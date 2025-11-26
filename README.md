@@ -29,7 +29,7 @@ curl -sL https://raw.githubusercontent.com/jimmy-is-me/vps-security-scanner/main
 
 ### 方法 2：下載後執行
 下載腳本
-wget https://raw.githubusercontent.com/YOUR_USERNAME/vps-security-scanner/main/vps-security-scanner.sh
+wget https://raw.githubusercontent.com/jimmy-is-me/vps-security-scanner/main/vps-security-scanner.sh
 賦予執行權限
 chmod +x vps-security-scanner.sh
 執行
