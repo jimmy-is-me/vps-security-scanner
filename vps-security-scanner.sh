@@ -5,6 +5,7 @@
 # 適用於所有類型的 VPS (XCloud, FlyWP, cPanel, Plesk 等)
 # GitHub: https://github.com/YOUR_USERNAME/vps-security-scanner
 # License: MIT
+# Version: 1.1.0 (優化版)
 #################################################
 
 # 顏色定義
@@ -15,7 +16,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # 版本資訊
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 echo "========================================"
 echo "  VPS 安全掃描與清除工具 v${VERSION}"
@@ -128,11 +129,25 @@ echo ""
 # 6. 掃描 cron 裡的可疑排程
 # ==========================================
 echo -e "${YELLOW}[6/10] 掃描 cron 排程...${NC}"
-SUSPICIOUS_CRON=$(crontab -l 2>/dev/null | grep -v "^#" | grep -E "curl.*http|wget.*http|/tmp/|/dev/shm/|base64" | wc -l)
+SUSPICIOUS_CRON=0
+
+# 檢查 root crontab
+ROOT_CRON=$(crontab -l 2>/dev/null | grep -v "^#" | grep -E "curl.*http|wget.*http|/tmp/|/dev/shm/|base64" | wc -l)
+if [ $ROOT_CRON -gt 0 ]; then
+    echo -e "${RED}✗ Root crontab 發現 $ROOT_CRON 個可疑項目${NC}"
+    crontab -l 2>/dev/null | grep -v "^#" | grep -E "curl.*http|wget.*http|/tmp/|/dev/shm/|base64"
+    SUSPICIOUS_CRON=$((SUSPICIOUS_CRON + ROOT_CRON))
+fi
+
+# 檢查系統 cron
+SYSTEM_CRON=$(cat /etc/cron.d/* 2>/dev/null | grep -v "^#" | grep -E "curl.*http|wget.*http|/tmp/|/dev/shm/|base64" | wc -l)
+if [ $SYSTEM_CRON -gt 0 ]; then
+    echo -e "${RED}✗ 系統 cron 發現 $SYSTEM_CRON 個可疑項目${NC}"
+    cat /etc/cron.d/* 2>/dev/null | grep -v "^#" | grep -E "curl.*http|wget.*http|/tmp/|/dev/shm/|base64"
+    SUSPICIOUS_CRON=$((SUSPICIOUS_CRON + SYSTEM_CRON))
+fi
 
 if [ $SUSPICIOUS_CRON -gt 0 ]; then
-    echo -e "${RED}✗ Root crontab 發現 $SUSPICIOUS_CRON 個可疑項目${NC}"
-    crontab -l 2>/dev/null | grep -v "^#" | grep -E "curl.*http|wget.*http|/tmp/|/dev/shm/|base64"
     THREATS_FOUND=$((THREATS_FOUND + SUSPICIOUS_CRON))
     echo -e "${YELLOW}⚠ 請手動檢查並刪除可疑的 cron 項目${NC}"
 else
@@ -157,18 +172,32 @@ fi
 echo ""
 
 # ==========================================
-# 8. 掃描常見 webshell 特徵
+# 8. 掃描常見 webshell 特徵（快速版）
 # ==========================================
-echo -e "${YELLOW}[8/10] 掃描 webshell 特徵碼...${NC}"
-WEBSHELL_COUNT=$(find /var/www /home -name "*.php" -exec grep -l "eval(base64_decode\|gzinflate(base64_decode\|eval(gzuncompress\|@preg_replace.*\/e" {} \; 2>/dev/null | wc -l)
+echo -e "${YELLOW}[8/10] 掃描 webshell 特徵碼（快速掃描：最近 7 天修改的檔案）...${NC}"
 
-if [ $WEBSHELL_COUNT -gt 0 ]; then
-    echo -e "${RED}✗ 發現 $WEBSHELL_COUNT 個可能的 webshell${NC}"
-    find /var/www /home -name "*.php" -exec grep -l "eval(base64_decode\|gzinflate(base64_decode" {} \; 2>/dev/null | head -10
+# 只掃描最近 7 天被修改的 PHP 檔案，排除常見的大型目錄
+WEBSHELL_COUNT=$(timeout 60 find /var/www /home \
+    -path "*/node_modules" -prune -o \
+    -path "*/vendor" -prune -o \
+    -path "*/.git" -prune -o \
+    -path "*/cache" -prune -o \
+    -name "*.php" -type f -mtime -7 \
+    -exec grep -l "eval(base64_decode\|gzinflate(base64_decode\|eval(gzuncompress\|assert.*base64" {} + 2>/dev/null | wc -l)
+
+SCAN_STATUS=$?
+
+if [ $SCAN_STATUS -eq 124 ]; then
+    echo -e "${YELLOW}⚠ 掃描超時（超過 60 秒），已跳過${NC}"
+    echo -e "${BLUE}ℹ 建議使用 Wordfence (WordPress) 或 Maldet 進行完整掃描${NC}"
+elif [ $WEBSHELL_COUNT -gt 0 ]; then
+    echo -e "${RED}✗ 發現 $WEBSHELL_COUNT 個可能的 webshell（最近 7 天修改）${NC}"
+    timeout 30 find /var/www /home -name "*.php" -mtime -7 -exec grep -l "eval(base64_decode\|gzinflate(base64_decode" {} + 2>/dev/null | head -10
     THREATS_FOUND=$((THREATS_FOUND + WEBSHELL_COUNT))
-    echo -e "${YELLOW}⚠ 請手動檢查後刪除（或用 Wordfence 掃描）${NC}"
+    echo -e "${YELLOW}⚠ 請手動檢查後刪除，或使用 Wordfence 掃描${NC}"
 else
-    echo -e "${GREEN}✓ 沒有發現明顯的 webshell${NC}"
+    echo -e "${GREEN}✓ 最近 7 天沒有發現可疑檔案${NC}"
+    echo -e "${BLUE}ℹ 建議定期使用 Wordfence 進行完整掃描${NC}"
 fi
 echo ""
 
@@ -178,6 +207,14 @@ echo ""
 echo -e "${YELLOW}[9/10] 檢查最近登入記錄...${NC}"
 echo "最近 5 次登入:"
 last -5 | head -5
+echo ""
+FAILED_LOGINS=$(lastb 2>/dev/null | wc -l)
+if [ $FAILED_LOGINS -gt 0 ]; then
+    echo "失敗登入嘗試: $FAILED_LOGINS 次"
+    if [ $FAILED_LOGINS -gt 100 ]; then
+        echo -e "${YELLOW}⚠ 建議安裝 Fail2Ban 防止 SSH 暴力破解${NC}"
+    fi
+fi
 echo ""
 
 # ==========================================
