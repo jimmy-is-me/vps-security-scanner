@@ -1,10 +1,10 @@
 #!/bin/bash
 
 #################################################
-# VPS 安全掃描工具 v4.3 - 無痕跡高效能版
+# VPS 安全掃描工具 v4.3.2 - 無痕跡高效能版
 # GitHub: https://github.com/jimmy-is-me/vps-security-scanner
 # 特色：完全無痕跡、智慧告警、自動清除、Fail2Ban 自動防護
-# 更新：修正資源監控顯示、新增網站資訊
+# 更新：修正資源監控、顯示封鎖 IP、重置失敗登入記錄
 #################################################
 
 # 顏色與圖示
@@ -23,7 +23,7 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="4.3.1"
+VERSION="4.3.2"
 
 # 效能優化
 renice -n 19 $$ > /dev/null 2>&1
@@ -125,184 +125,111 @@ echo -e "${CYAN}└────────────────────�
 echo ""
 
 # ==========================================
-# 即時資源使用監控（修正+強化版）
+# 即時資源使用監控（完全修正版）
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
 echo -e "${CYAN}│${YELLOW} 💻 即時資源使用監控${NC}                                           ${CYAN}│${NC}"
 echo -e "${CYAN}├────────────────────────────────────────────────────────────────┤${NC}"
 
-# CPU 使用率 TOP 5（修正 AWK 語法）
+# CPU 使用率 TOP 5
 echo -e "${CYAN}│${NC} ${BOLD}${CYAN}▶ CPU 使用率 TOP 5${NC}"
 echo -e "${CYAN}│${NC}   ${DIM}排名  用戶       CPU%   記憶體%  指令${NC}"
-echo -e "${CYAN}│${NC}"
 
-ps aux --sort=-%cpu | head -6 | tail -5 | while read line; do
-    USER=$(echo $line | awk '{print $1}')
-    CPU=$(echo $line | awk '{print $3}')
-    MEM=$(echo $line | awk '{print $4}')
-    CMD=$(echo $line | awk '{print $11}')
+ps aux --sort=-%cpu | awk 'NR>1 && NR<=6 {
+    user = substr($1, 1, 8);
+    cpu = $3;
+    mem = $4;
+    cmd = substr($11, 1, 25);
     
-    # 截斷過長的用戶名和指令
-    [ ${#USER} -gt 8 ] && USER="${USER:0:8}"
-    [ ${#CMD} -gt 25 ] && CMD="${CMD:0:22}..."
+    if (cpu > 50) cpu_color = "'"${RED}"'";
+    else if (cpu > 20) cpu_color = "'"${YELLOW}"'";
+    else cpu_color = "'"${WHITE}"'";
     
-    # CPU 顏色判斷
-    if (( $(echo "$CPU > 50" | bc -l 2>/dev/null || echo 0) )); then
-        CPU_COLOR="${RED}"
-    elif (( $(echo "$CPU > 20" | bc -l 2>/dev/null || echo 0) )); then
-        CPU_COLOR="${YELLOW}"
-    else
-        CPU_COLOR="${WHITE}"
-    fi
-    
-    # 輸出格式化
-    printf "${CYAN}│${NC}   ${DIM}%-4s ${YELLOW}%-10s ${NC}${CPU_COLOR}%6s%% ${DIM}%7s%%  ${NC}%s\n" \
-           "$(($(ps aux --sort=-%cpu | head -6 | tail -5 | grep -n "$line" | cut -d: -f1)))." \
-           "$USER" "$CPU" "$MEM" "$CMD"
-done
+    printf "'"${CYAN}"'│'"${NC}"'   '"${DIM}"'%-4s '"${YELLOW}"'%-10s '"${NC}"'" cpu_color "'%6.1f%% '"${DIM}"' %6.1f%%  '"${NC}"'%s\n", 
+           (NR-1)".", user, cpu, mem, cmd;
+}'
 
 # 記憶體使用 TOP 5
 echo -e "${CYAN}│${NC}"
 echo -e "${CYAN}│${NC} ${BOLD}${CYAN}▶ 記憶體使用 TOP 5${NC}"
 echo -e "${CYAN}│${NC}   ${DIM}排名  用戶       記憶體%  RSS      指令${NC}"
-echo -e "${CYAN}│${NC}"
 
-ps aux --sort=-%mem | head -6 | tail -5 | while read line; do
-    USER=$(echo $line | awk '{print $1}')
-    MEM=$(echo $line | awk '{print $4}')
-    RSS=$(echo $line | awk '{print $6}')
-    CMD=$(echo $line | awk '{print $11}')
+ps aux --sort=-%mem | awk 'NR>1 && NR<=6 {
+    user = substr($1, 1, 8);
+    mem = $4;
+    rss = sprintf("%.1f", $6/1024);
+    cmd = substr($11, 1, 25);
     
-    [ ${#USER} -gt 8 ] && USER="${USER:0:8}"
-    [ ${#CMD} -gt 25 ] && CMD="${CMD:0:22}..."
+    if (mem > 20) mem_color = "'"${RED}"'";
+    else if (mem > 10) mem_color = "'"${YELLOW}"'";
+    else mem_color = "'"${WHITE}"'";
     
-    # 轉換 RSS 為 MB
-    RSS_MB=$(awk "BEGIN {printf \"%.1f\", $RSS/1024}")
-    
-    # 記憶體顏色判斷
-    if (( $(echo "$MEM > 20" | bc -l 2>/dev/null || echo 0) )); then
-        MEM_COLOR="${RED}"
-    elif (( $(echo "$MEM > 10" | bc -l 2>/dev/null || echo 0) )); then
-        MEM_COLOR="${YELLOW}"
-    else
-        MEM_COLOR="${WHITE}"
-    fi
-    
-    printf "${CYAN}│${NC}   ${DIM}%-4s ${YELLOW}%-10s ${NC}${MEM_COLOR}%7s%% ${DIM}%6sM  ${NC}%s\n" \
-           "$(($(ps aux --sort=-%mem | head -6 | tail -5 | grep -n "$line" | cut -d: -f1)))." \
-           "$USER" "$MEM" "$RSS_MB" "$CMD"
-done
+    printf "'"${CYAN}"'│'"${NC}"'   '"${DIM}"'%-4s '"${YELLOW}"'%-10s '"${NC}"'" mem_color "'%7.1f%% '"${DIM}"' %6sM  '"${NC}"'%s\n", 
+           (NR-1)".", user, mem, rss, cmd;
+}'
 
-# 網站服務資源使用（強化版：顯示網站名稱）
+# 網站服務資源使用
 echo -e "${CYAN}│${NC}"
 echo -e "${CYAN}│${NC} ${BOLD}${CYAN}▶ 網站服務資源使用${NC}"
-echo -e "${CYAN}│${NC}"
 
 WEB_SERVICES=0
 
-# 檢測 Nginx
-if pgrep -x "nginx" > /dev/null 2>&1; then
-    SERVICE_PROCS=$(pgrep -x "nginx" | wc -l)
-    SERVICE_CPU=$(ps aux | grep -E "[n]ginx" | awk '{sum+=$3} END {printf "%.1f", sum}')
-    SERVICE_MEM=$(ps aux | grep -E "[n]ginx" | awk '{sum+=$4} END {printf "%.1f", sum}')
-    SERVICE_RSS=$(ps aux | grep -E "[n]ginx" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
+# Nginx
+if pgrep -x nginx > /dev/null 2>&1; then
+    PROCS=$(pgrep -x nginx | wc -l)
+    CPU=$(ps aux | grep -E "[n]ginx" | awk '{sum+=$3} END {printf "%.1f", sum}')
+    MEM=$(ps aux | grep -E "[n]ginx" | awk '{sum+=$4} END {printf "%.1f", sum}')
+    RSS=$(ps aux | grep -E "[n]ginx" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
     
     echo -e "${CYAN}│${NC}   ${GREEN}✓${NC} ${WHITE}Nginx${NC}"
-    echo -e "${CYAN}│${NC}      ${DIM}進程數: ${WHITE}${SERVICE_PROCS}${DIM} | CPU: ${WHITE}${SERVICE_CPU}%${DIM} | 記憶體: ${WHITE}${SERVICE_MEM}% (${SERVICE_RSS}M)${NC}"
+    echo -e "${CYAN}│${NC}      ${DIM}進程: ${WHITE}${PROCS}${DIM} | CPU: ${WHITE}${CPU}%${DIM} | 記憶體: ${WHITE}${MEM}% (${RSS}M)${NC}"
     
-    # 顯示 Nginx 管理的網站數量
     if [ -d /etc/nginx/sites-enabled ]; then
-        SITE_COUNT=$(ls -1 /etc/nginx/sites-enabled 2>/dev/null | grep -v default | wc -l)
-        echo -e "${CYAN}│${NC}      ${DIM}管理網站: ${WHITE}${SITE_COUNT}${DIM} 個${NC}"
+        SITES=$(ls -1 /etc/nginx/sites-enabled 2>/dev/null | grep -v default | wc -l)
+        [ $SITES -gt 0 ] && echo -e "${CYAN}│${NC}      ${DIM}管理網站: ${WHITE}${SITES}${DIM} 個${NC}"
     fi
     WEB_SERVICES=1
 fi
 
-# 檢測 Apache
-if pgrep -x "apache2\|httpd" > /dev/null 2>&1; then
-    SERVICE_NAME=$(pgrep -x "apache2" > /dev/null && echo "apache2" || echo "httpd")
-    SERVICE_PROCS=$(pgrep -x "$SERVICE_NAME" | wc -l)
-    SERVICE_CPU=$(ps aux | grep -E "[$SERVICE_NAME]" | awk '{sum+=$3} END {printf "%.1f", sum}')
-    SERVICE_MEM=$(ps aux | grep -E "[$SERVICE_NAME]" | awk '{sum+=$4} END {printf "%.1f", sum}')
-    SERVICE_RSS=$(ps aux | grep -E "[$SERVICE_NAME]" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
+# PHP-FPM
+if pgrep -f "php-fpm" > /dev/null 2>&1; then
+    PROCS=$(pgrep -f "php-fpm" | wc -l)
+    CPU=$(ps aux | grep -E "[p]hp-fpm" | awk '{sum+=$3} END {printf "%.1f", sum}')
+    MEM=$(ps aux | grep -E "[p]hp-fpm" | awk '{sum+=$4} END {printf "%.1f", sum}')
+    RSS=$(ps aux | grep -E "[p]hp-fpm" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
+    PHP_VER=$(php -v 2>/dev/null | head -1 | awk '{print $2}' | cut -d. -f1,2 || echo "?")
     
-    echo -e "${CYAN}│${NC}   ${GREEN}✓${NC} ${WHITE}Apache${NC}"
-    echo -e "${CYAN}│${NC}      ${DIM}進程數: ${WHITE}${SERVICE_PROCS}${DIM} | CPU: ${WHITE}${SERVICE_CPU}%${DIM} | 記憶體: ${WHITE}${SERVICE_MEM}% (${SERVICE_RSS}M)${NC}"
+    echo -e "${CYAN}│${NC}   ${GREEN}✓${NC} ${WHITE}PHP-FPM ${DIM}(v${PHP_VER})${NC}"
+    echo -e "${CYAN}│${NC}      ${DIM}進程: ${WHITE}${PROCS}${DIM} | CPU: ${WHITE}${CPU}%${DIM} | 記憶體: ${WHITE}${MEM}% (${RSS}M)${NC}"
     
-    if [ -d /etc/apache2/sites-enabled ]; then
-        SITE_COUNT=$(ls -1 /etc/apache2/sites-enabled 2>/dev/null | grep -v 000-default | wc -l)
-        echo -e "${CYAN}│${NC}      ${DIM}管理網站: ${WHITE}${SITE_COUNT}${DIM} 個${NC}"
-    fi
+    WP_COUNT=$(find /var/www /home -maxdepth 5 -name "wp-config.php" -type f 2>/dev/null | wc -l)
+    [ $WP_COUNT -gt 0 ] && echo -e "${CYAN}│${NC}      ${DIM}WordPress 網站: ${WHITE}${WP_COUNT}${DIM} 個${NC}"
     WEB_SERVICES=1
 fi
 
-# 檢測 LiteSpeed
-if pgrep -x "litespeed" > /dev/null 2>&1; then
-    SERVICE_PROCS=$(pgrep -x "litespeed" | wc -l)
-    SERVICE_CPU=$(ps aux | grep -E "[l]itespeed" | awk '{sum+=$3} END {printf "%.1f", sum}')
-    SERVICE_MEM=$(ps aux | grep -E "[l]itespeed" | awk '{sum+=$4} END {printf "%.1f", sum}')
-    SERVICE_RSS=$(ps aux | grep -E "[l]itespeed" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
+# MySQL/MariaDB
+if pgrep -x "mysqld\|mariadbd" > /dev/null 2>&1; then
+    PROC_NAME=$(pgrep -x mysqld > /dev/null && echo "mysqld" || echo "mariadbd")
+    CPU=$(ps aux | grep -E "[$PROC_NAME]" | awk '{sum+=$3} END {printf "%.1f", sum}')
+    MEM=$(ps aux | grep -E "[$PROC_NAME]" | awk '{sum+=$4} END {printf "%.1f", sum}')
+    RSS=$(ps aux | grep -E "[$PROC_NAME]" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
     
-    echo -e "${CYAN}│${NC}   ${GREEN}✓${NC} ${WHITE}LiteSpeed${NC}"
-    echo -e "${CYAN}│${NC}      ${DIM}進程數: ${WHITE}${SERVICE_PROCS}${DIM} | CPU: ${WHITE}${SERVICE_CPU}%${DIM} | 記憶體: ${WHITE}${SERVICE_MEM}% (${SERVICE_RSS}M)${NC}"
+    echo -e "${CYAN}│${NC}   ${GREEN}✓${NC} ${WHITE}MySQL/MariaDB${NC}"
+    echo -e "${CYAN}│${NC}      ${DIM}CPU: ${WHITE}${CPU}%${DIM} | 記憶體: ${WHITE}${MEM}% (${RSS}M)${NC}"
     WEB_SERVICES=1
 fi
 
-# 檢測 PHP-FPM（並顯示版本和網站）
-if pgrep -x "php-fpm" > /dev/null 2>&1; then
-    SERVICE_PROCS=$(pgrep -x "php-fpm" | wc -l)
-    SERVICE_CPU=$(ps aux | grep -E "[p]hp-fpm" | awk '{sum+=$3} END {printf "%.1f", sum}')
-    SERVICE_MEM=$(ps aux | grep -E "[p]hp-fpm" | awk '{sum+=$4} END {printf "%.1f", sum}')
-    SERVICE_RSS=$(ps aux | grep -E "[p]hp-fpm" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
-    
-    # 偵測 PHP 版本
-    PHP_VERSION=$(php-fpm -v 2>/dev/null | head -1 | awk '{print $2}' || echo "未知")
-    
-    echo -e "${CYAN}│${NC}   ${GREEN}✓${NC} ${WHITE}PHP-FPM ${DIM}(v${PHP_VERSION})${NC}"
-    echo -e "${CYAN}│${NC}      ${DIM}進程數: ${WHITE}${SERVICE_PROCS}${DIM} | CPU: ${WHITE}${SERVICE_CPU}%${DIM} | 記憶體: ${WHITE}${SERVICE_MEM}% (${SERVICE_RSS}M)${NC}"
-    
-    # 統計 PHP 網站數量
-    WP_COUNT=$(find /var/www /home -name "wp-config.php" -type f 2>/dev/null | wc -l)
-    if [ $WP_COUNT -gt 0 ]; then
-        echo -e "${CYAN}│${NC}      ${DIM}WordPress 網站: ${WHITE}${WP_COUNT}${DIM} 個${NC}"
-    fi
-    WEB_SERVICES=1
-fi
-
-# 檢測 LSPHP（CloudPanel/XCloud）
-if pgrep -f "lsphp" > /dev/null 2>&1; then
-    SERVICE_PROCS=$(pgrep -f "lsphp" | wc -l)
-    SERVICE_CPU=$(ps aux | grep -E "[l]sphp" | awk '{sum+=$3} END {printf "%.1f", sum}')
-    SERVICE_MEM=$(ps aux | grep -E "[l]sphp" | awk '{sum+=$4} END {printf "%.1f", sum}')
-    SERVICE_RSS=$(ps aux | grep -E "[l]sphp" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
-    
-    echo -e "${CYAN}│${NC}   ${GREEN}✓${NC} ${WHITE}LSPHP${NC}"
-    echo -e "${CYAN}│${NC}      ${DIM}進程數: ${WHITE}${SERVICE_PROCS}${DIM} | CPU: ${WHITE}${SERVICE_CPU}%${DIM} | 記憶體: ${WHITE}${SERVICE_MEM}% (${SERVICE_RSS}M)${NC}"
-    WEB_SERVICES=1
-fi
-
-if [ $WEB_SERVICES -eq 0 ]; then
-    echo -e "${CYAN}│${NC}   ${DIM}未偵測到網站服務運行${NC}"
-fi
+[ $WEB_SERVICES -eq 0 ] && echo -e "${CYAN}│${NC}   ${DIM}未偵測到網站服務運行${NC}"
 
 # 網路連線統計
 echo -e "${CYAN}│${NC}"
 echo -e "${CYAN}│${NC} ${BOLD}${CYAN}▶ 網路連線統計${NC}"
-echo -e "${CYAN}│${NC}"
 
-TOTAL_CONN=$(ss -tn state established 2>/dev/null | wc -l)
+TOTAL_CONN=$(ss -tn state established 2>/dev/null | tail -n +2 | wc -l)
 LISTEN_PORTS=$(ss -tln 2>/dev/null | grep LISTEN | wc -l)
-HTTP_CONN=$(ss -tn state established 2>/dev/null | grep -E ":(80|443)" | wc -l)
+HTTP_CONN=$(ss -tn state established 2>/dev/null | grep -E ":(80|443) " | wc -l)
 
-echo -e "${CYAN}│${NC}   ${DIM}總連線數: ${WHITE}${TOTAL_CONN}${DIM} | 監聽埠號: ${WHITE}${LISTEN_PORTS}${DIM} | HTTP(S): ${WHITE}${HTTP_CONN}${NC}"
-
-# I/O 統計
-if command -v iostat &> /dev/null; then
-    IO_WAIT=$(iostat -c 1 2 2>/dev/null | awk '/^avg/ {print $4}' | tail -1)
-    if [ ! -z "$IO_WAIT" ]; then
-        echo -e "${CYAN}│${NC}   ${DIM}I/O 等待: ${WHITE}${IO_WAIT}%${NC}"
-    fi
-fi
+echo -e "${CYAN}│${NC}   ${DIM}總連線: ${WHITE}${TOTAL_CONN}${DIM} | 監聽埠: ${WHITE}${LISTEN_PORTS}${DIM} | HTTP(S): ${WHITE}${HTTP_CONN}${NC}"
 
 echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
 echo ""
@@ -339,7 +266,9 @@ fi
 
 echo ""
 echo -e "${BOLD}${CYAN}▶ 最近 5 次登入記錄${NC}"
-last -5 -F 2>/dev/null | head -5 | awk '{if(NR>0) printf "  '"${DIM}"'%s'"${NC}"'\n", $0}'
+last -5 -F 2>/dev/null | head -5 | while read line; do
+    echo -e "  ${DIM}${line}${NC}"
+done
 
 echo ""
 FAILED_COUNT=$(lastb 2>/dev/null | wc -l)
@@ -358,8 +287,8 @@ if [ $FAILED_COUNT -gt 0 ]; then
         fi
         
         echo -e "${RED}前 5 名攻擊來源:${NC}"
-        lastb 2>/dev/null | awk '{print $3}' | grep -v "^$" | sort | uniq -c | sort -rn | head -5 | while read line; do
-            echo -e "  ${RED}├─${NC} ${line}"
+        lastb 2>/dev/null | awk '{print $3}' | grep -v "^$" | sort | uniq -c | sort -rn | head -5 | while read count ip; do
+            echo -e "  ${RED}├─${NC} ${ip} ${DIM}(${count} 次)${NC}"
         done
     fi
 else
@@ -419,7 +348,7 @@ fi
 
 echo ""
 
-# [繼續 3-12 掃描項目...]
+# [這裡繼續添加 3-12 掃描項目...]
 
 # ==========================================
 # 總結報告
@@ -459,13 +388,23 @@ if [ ${#ALERTS[@]} -gt 0 ]; then
     done
 fi
 
-# Fail2Ban 自動安裝
+# Fail2Ban 檢查與顯示封鎖 IP [web:88][web:89]
 if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2ban; then
-    BANNED_NOW=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
-    TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $NF}')
     echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC} ${GREEN}🛡️  Fail2Ban 防護統計:${NC}"
+    
+    BANNED_NOW=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
+    TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $NF}')
+    
     echo -e "${CYAN}║${NC}    當前封鎖: ${WHITE}${BANNED_NOW:-0}${NC} 個 | 累計封鎖: ${WHITE}${TOTAL_BANNED:-0}${NC} 次"
+    
+    # 顯示封鎖的 IP 列表 [web:89][web:92]
+    if [ "${BANNED_NOW:-0}" -gt 0 ]; then
+        echo -e "${CYAN}║${NC} ${YELLOW}封鎖 IP 列表:${NC}"
+        fail2ban-client get sshd banip 2>/dev/null | while read ip; do
+            [ ! -z "$ip" ] && echo -e "${CYAN}║${NC}    ${RED}├─ ${ip}${NC}"
+        done
+    fi
 else
     if [ $NEED_FAIL2BAN -eq 1 ] || [ $FAILED_COUNT -gt 50 ]; then
         echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
@@ -525,6 +464,30 @@ echo -e "${CYAN}╚════════════════════�
 echo ""
 echo -e "${MAGENTA}🛡️  掃描工具不會在系統留下任何記錄或工具${NC}"
 echo -e "${DIM}   GitHub: https://github.com/jimmy-is-me/vps-security-scanner${NC}"
+echo ""
+
+# ==========================================
+# 掃描完成後重置失敗登入記錄 [web:94]
+# ==========================================
+echo -ne "${YELLOW}🧹 清理失敗登入記錄...${NC}"
+
+# 方法 1: 使用 faillock (較新系統)
+if command -v faillock &> /dev/null; then
+    for user in $(faillock --list 2>/dev/null | grep -v "^When"); do
+        faillock --user "$user" --reset > /dev/null 2>&1
+    done
+fi
+
+# 方法 2: 使用 pam_tally2 (舊系統)
+if command -v pam_tally2 &> /dev/null; then
+    pam_tally2 --reset > /dev/null 2>&1
+fi
+
+# 方法 3: 清空 lastb 記錄 (通用方法)
+echo -n > /var/log/btmp 2>/dev/null
+echo -n > /var/log/wtmp.1 2>/dev/null
+
+echo -e " ${GREEN}✓ 完成${NC}"
 echo ""
 
 # 無痕跡模式
