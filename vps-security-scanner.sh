@@ -1,10 +1,10 @@
 #!/bin/bash
 
 #################################################
-# VPS 安全掃描工具 v4.3.3 - 無痕跡高效能版
+# VPS 安全掃描工具 v4.4.0 - 無痕跡高效能版
 # GitHub: https://github.com/jimmy-is-me/vps-security-scanner
-# 特色：完全無痕跡、智慧告警、自動清除、Fail2Ban 自動防護
-# 更新：完全修正 AWK 語法錯誤
+# 特色:完全無痕跡、智慧告警、自動清除、Fail2Ban 自動防護
+# 更新:Fail2Ban 48小時封鎖、Webshell 內容掃描
 #################################################
 
 # 顏色與圖示
@@ -23,7 +23,7 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="4.3.3"
+VERSION="4.4.0"
 
 # 效能優化
 renice -n 19 $$ > /dev/null 2>&1
@@ -125,24 +125,24 @@ echo -e "${CYAN}└────────────────────�
 echo ""
 
 # ==========================================
-# 即時資源使用監控（完全重寫，避免 AWK 巢狀引號）
+# 即時資源使用監控
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
 echo -e "${CYAN}│${YELLOW} 💻 即時資源使用監控${NC}                                           ${CYAN}│${NC}"
 echo -e "${CYAN}├────────────────────────────────────────────────────────────────┤${NC}"
 
-# CPU 使用率 TOP 5（改用 while read 避免 AWK 字串問題）
+# CPU 使用率 TOP 5
 echo -e "${CYAN}│${NC} ${BOLD}${CYAN}▶ CPU 使用率 TOP 5${NC}"
 echo -e "${CYAN}│${NC}   ${DIM}排名  用戶       CPU%   記憶體%  指令${NC}"
 
+RANK=0
 ps aux --sort=-%cpu | head -6 | tail -5 | while IFS= read -r line; do
+    RANK=$((RANK + 1))
     USER=$(echo "$line" | awk '{print $1}' | cut -c1-8)
     CPU=$(echo "$line" | awk '{print $3}')
     MEM=$(echo "$line" | awk '{print $4}')
     CMD=$(echo "$line" | awk '{print $11}' | cut -c1-25)
-    RANK=$((${RANK:-0} + 1))
     
-    # CPU 顏色判斷（改用 bash 條件）
     if (( $(echo "$CPU > 50" | bc -l 2>/dev/null || echo 0) )); then
         CPU_COLOR="${RED}"
     elif (( $(echo "$CPU > 20" | bc -l 2>/dev/null || echo 0) )); then
@@ -162,16 +162,14 @@ echo -e "${CYAN}│${NC}   ${DIM}排名  用戶       記憶體%  RSS      指�
 
 RANK=0
 ps aux --sort=-%mem | head -6 | tail -5 | while IFS= read -r line; do
+    RANK=$((RANK + 1))
     USER=$(echo "$line" | awk '{print $1}' | cut -c1-8)
     MEM=$(echo "$line" | awk '{print $4}')
     RSS=$(echo "$line" | awk '{print $6}')
     CMD=$(echo "$line" | awk '{print $11}' | cut -c1-25)
-    RANK=$((${RANK:-0} + 1))
     
-    # 轉換 RSS 為 MB
     RSS_MB=$(awk "BEGIN {printf \"%.1f\", $RSS/1024}")
     
-    # 記憶體顏色判斷
     if (( $(echo "$MEM > 20" | bc -l 2>/dev/null || echo 0) )); then
         MEM_COLOR="${RED}"
     elif (( $(echo "$MEM > 10" | bc -l 2>/dev/null || echo 0) )); then
@@ -364,7 +362,59 @@ fi
 
 echo ""
 
-# [這裡繼續添加 3-12 掃描項目...]
+# ==========================================
+# 3. Webshell 內容掃描 (新增輕量級掃描) [web:120][web:124]
+# ==========================================
+echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
+echo -e "${CYAN}│${YELLOW} [2/12] 🔍 Webshell 特徵碼掃描 (內容檢測)${NC}                    ${CYAN}│${NC}"
+echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
+echo ""
+
+echo -e "${DIM}掃描範圍: 最近 7 天修改的 PHP 檔案${NC}"
+echo -e "${DIM}偵測特徵: eval(), base64_decode(), shell_exec(), system()${NC}"
+echo ""
+
+WEBSHELL_COUNT=0
+WEBSHELL_FILES=()
+
+# 掃描最近 7 天的 PHP 檔案 (排除 vendor, cache 目錄)
+while IFS= read -r file; do
+    # 檢查檔案內容是否包含可疑特徵
+    if grep -qiE "(eval\s*\(|base64_decode\s*\(.*eval|shell_exec\s*\(|system\s*\(.*\$_|passthru\s*\(|exec\s*\(.*\$_GET)" "$file" 2>/dev/null; then
+        WEBSHELL_COUNT=$((WEBSHELL_COUNT + 1))
+        WEBSHELL_FILES+=("$file")
+        
+        # 顯示前 5 個發現的檔案
+        if [ $WEBSHELL_COUNT -le 5 ]; then
+            echo -e "${RED}  ├─ ${file}${NC}"
+            
+            # 顯示匹配的程式碼片段 (截取前 50 字元)
+            SUSPICIOUS_LINE=$(grep -m1 -iE "(eval\s*\(|base64_decode\s*\(.*eval|shell_exec)" "$file" 2>/dev/null | head -c 60)
+            [ ! -z "$SUSPICIOUS_LINE" ] && echo -e "${DIM}  │  └─ ${SUSPICIOUS_LINE}...${NC}"
+        fi
+    fi
+done < <(find /var/www /home -type f -name "*.php" -mtime -7 \
+    ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" 2>/dev/null)
+
+if [ $WEBSHELL_COUNT -gt 0 ]; then
+    echo ""
+    echo -e "${RED}⚠ ${BOLD}發現 ${WEBSHELL_COUNT} 個可疑 PHP 檔案${NC}"
+    [ $WEBSHELL_COUNT -gt 5 ] && echo -e "${DIM}  (僅顯示前 5 個,完整清單需手動檢查)${NC}"
+    
+    THREATS_FOUND=$((THREATS_FOUND + WEBSHELL_COUNT))
+    add_alert "CRITICAL" "Webshell 檔案: ${WEBSHELL_COUNT} 個 (需手動確認)"
+    
+    # 提示如何手動檢查
+    echo ""
+    echo -e "${YELLOW}建議動作:${NC}"
+    echo -e "  ${DIM}1. 檢查上方列出的檔案是否為惡意程式${NC}"
+    echo -e "  ${DIM}2. 使用編輯器檢視檔案完整內容${NC}"
+    echo -e "  ${DIM}3. 確認後手動刪除: ${WHITE}rm -f /path/to/suspicious.php${NC}"
+else
+    echo -e "${GREEN}✓ 未發現可疑 PHP 檔案${NC}"
+fi
+
+echo ""
 
 # ==========================================
 # 總結報告
@@ -404,7 +454,7 @@ if [ ${#ALERTS[@]} -gt 0 ]; then
     done
 fi
 
-# Fail2Ban 檢查與顯示封鎖 IP
+# Fail2Ban 檢查與顯示封鎖 IP (更新為 48 小時封鎖) [web:116][web:117]
 if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2ban; then
     echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC} ${GREEN}🛡️  Fail2Ban 防護統計:${NC}"
@@ -413,6 +463,7 @@ if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2b
     TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $NF}')
     
     echo -e "${CYAN}║${NC}    當前封鎖: ${WHITE}${BANNED_NOW:-0}${NC} 個 | 累計封鎖: ${WHITE}${TOTAL_BANNED:-0}${NC} 次"
+    echo -e "${CYAN}║${NC}    ${DIM}封鎖規則: 5 次失敗 / 10 分鐘 = 封鎖 48 小時${NC}"
     
     if [ "${BANNED_NOW:-0}" -gt 0 ]; then
         echo -e "${CYAN}║${NC} ${YELLOW}封鎖 IP 列表:${NC}"
@@ -435,13 +486,25 @@ else
         fi
         
         if [ $? -eq 0 ]; then
+            # 建立 48 小時封鎖配置 [web:116][web:122]
             cat > /etc/fail2ban/jail.local <<'EOF'
 [DEFAULT]
+# 白名單 IP
 ignoreip = 127.0.0.1/8 ::1 114.39.15.79
-bantime = 3600
-findtime = 600
+
+# 封鎖 48 小時 (2d = 2 days)
+bantime = 2d
+
+# 檢測窗口 10 分鐘
+findtime = 10m
+
+# 最多失敗 5 次
 maxretry = 5
+
+# 郵件設定 (留空則不發送)
 destemail = 
+
+# 動作: 僅封鎖 IP
 action = %(action_)s
 
 [sshd]
@@ -449,10 +512,11 @@ enabled = true
 port = ssh
 logpath = /var/log/auth.log
 maxretry = 5
-bantime = 3600
-findtime = 600
+bantime = 2d
+findtime = 10m
 EOF
 
+            # CentOS/RHEL 使用不同的日誌路徑
             [ -f /etc/redhat-release ] && sed -i 's|logpath = /var/log/auth.log|logpath = /var/log/secure|' /etc/fail2ban/jail.local
             
             systemctl enable fail2ban > /dev/null 2>&1
@@ -462,7 +526,8 @@ EOF
             if systemctl is-active --quiet fail2ban; then
                 echo -e "${CYAN}║${NC} ${GREEN}✓ Fail2Ban 安裝成功並已啟動${NC}"
                 echo -e "${CYAN}║${NC}    • 白名單: ${WHITE}114.39.15.79${NC}"
-                echo -e "${CYAN}║${NC}    • 封鎖規則: ${WHITE}5 次失敗 / 10 分鐘 = 封鎖 1 小時${NC}"
+                echo -e "${CYAN}║${NC}    • 封鎖規則: ${WHITE}5 次失敗 / 10 分鐘 = 封鎖 48 小時${NC}"
+                echo -e "${CYAN}║${NC}    ${DIM}(bantime=2d, findtime=10m, maxretry=5)${NC}"
             else
                 echo -e "${CYAN}║${NC} ${RED}⚠ Fail2Ban 安裝失敗，請手動安裝${NC}"
             fi
