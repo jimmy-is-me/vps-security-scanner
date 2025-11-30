@@ -1,128 +1,79 @@
-# VPS 安全掃描與清除工具
+# 🛡️ VPS 安全掃描與清除工具 v4.0
 
-🛡️ 一鍵掃描並清除 VPS 上的惡意程式、webshell、木馬等安全威脅。
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Bash](https://img.shields.io/badge/Bash-4.0+-green.svg)](https://www.gnu.org/software/bash/)
+[![Platform](https://img.shields.io/badge/Platform-Linux-blue.svg)](https://www.linux.org/)
 
-適用於所有類型的 Linux VPS：XCloud、FlyWP、CloudPanel、cPanel、Plesk、DirectAdmin 等。
+一鍵掃描並清除 VPS 上的惡意程式、webshell、木馬、挖礦程式等安全威脅。
 
-## 功能特色
+**特色：完全無痕跡、智慧告警、自動清除、即時監控**
 
-✅ **自動掃描並清除**
-- 惡意 Process（亂碼名稱的可疑程式）
-- WordPress uploads 目錄的 PHP 木馬
-- XCloud/FlyWP migration 目錄的惡意檔案
+適用於所有 Linux VPS：XCloud、FlyWP、CloudPanel、cPanel、Plesk、DirectAdmin、純 VPS 等。
 
-⚠️ **掃描並提示（需手動處理）**
-- 臨時目錄的可執行檔
-- Cron 裡的可疑排程
-- Webshell 特徵碼
-- 隱藏的惡意檔案
+---
 
-📊 **監控檢查**
-- 對外可疑連線
-- SSH 登入記錄
-- 系統資源使用狀況
+## 📋 目錄
 
-## 快速使用
+- [功能特色](#功能特色)
+- [快速開始](#快速開始)
+- [掃描項目](#掃描項目)
+- [告警系統](#告警系統)
+- [安全性說明](#安全性說明)
+- [使用範例](#使用範例)
+- [系統需求](#系統需求)
+- [常見問題](#常見問題)
+- [更新日誌](#更新日誌)
+- [授權條款](#授權條款)
+
+---
+
+## ✨ 功能特色
+
+### 🚀 v4.0 重大更新
+
+#### 🔥 完全無痕跡設計
+- ❌ **不安裝任何掃毒工具**（不留 Maldet/ClamAV/AIDE 等）
+- ❌ **不寫入系統記錄**（不產生 `/var/log` 檔案）
+- ✅ **可選自動刪除腳本**（掃描完後自動移除）
+- ✅ **所有檢測用內建指令**（ps, find, ss, grep 等）
+
+#### 👤 即時登入監控
+- 顯示當前所有登入用戶
+- 標示外部 IP 登入（紅色警告）
+- 顯示最近 5 次成功登入
+- 統計失敗登入次數
+- 列出前 5 名暴力破解來源 IP
+
+#### 🚨 智慧告警系統
+當主機疑似被入侵時，自動顯示：
+- **威脅等級**（安全 ✅ / 低風險 ⚠️ / 中風險 ⚠️ / 高風險 🔥）
+- **詳細告警清單**（CRITICAL / HIGH / MEDIUM / LOW）
+- **緊急處置步驟**（斷開連線 / 更換密碼 / 停用用戶）
+
+#### ⚡ 自動清除威脅
+以下項目會**自動清除**，無需手動：
+- ✅ 惡意 Process（亂碼名稱程式）
+- ✅ 挖礦程式（xmrig, minerd, cpuminer）
+- ✅ WordPress uploads 目錄的 PHP 木馬
+- ✅ XCloud/FlyWP migration 暫存目錄
+
+#### 🔍 12 項完整掃描
+1. 惡意 Process 偵測（含挖礦程式）
+2. 對外可疑網路連線分析
+3. WordPress Uploads 目錄木馬掃描
+4. Migration 暫存目錄清理
+5. Cron 惡意排程檢查（含所有用戶）
+6. Webshell 特徵碼掃描（最近 7 天）
+7. WordPress 核心完整性驗證
+8. 系統資源異常檢查
+9. 隱藏惡意檔案掃描
+10. SSH 安全設定檢查
+11. 系統檔案變動檢查（24 小時）
+12. 開放埠號安全檢查
+
+---
+
+## 🚀 快速開始
 
 ### 方法 1：一行指令執行（推薦）
-curl -sL https://raw.githubusercontent.com/jimmy-is-me/vps-security-scanner/main/vps-security-scanner.sh | sudo bash
-
-### 方法 2：下載後執行
-下載腳本
-wget https://raw.githubusercontent.com/jimmy-is-me/vps-security-scanner/main/vps-security-scanner.sh
-賦予執行權限
-chmod +x vps-security-scanner.sh
-執行
-sudo ./vps-security-scanner.sh
-
-### 方法 3：複製貼上執行
-
-直接把 `vps-security-scanner.sh` 的內容複製貼到 SSH 終端機執行。
-
-
-## 安全性說明
-
-### ✅ 會自動清除的項目
-
-1. **惡意 Process**：只清除 8 字元亂碼名稱的 process（如 `rkuxyf5t`），不會動到正常服務
-2. **WordPress uploads 目錄的 PHP**：WordPress 的 uploads 目錄正常來說不應該有 .php 檔案
-3. **Migration 暫存目錄**：XCloud/FlyWP 的 migration 目錄是暫存目錄，刪除不會影響正式網站
-
-### ⚠️ 不會自動刪除的項目
-
-- 臨時目錄的檔案（避免誤刪）
-- Cron 排程（需手動確認）
-- Webshell 檔案（需仔細檢查）
-
-### 📂 完全不會動到的資料
-
-- ✅ 你的網站檔案（`/var/www/`, `/home/*/public_html/`）
-- ✅ 資料庫（MySQL/MariaDB）
-- ✅ 網站設定檔（`wp-config.php`, `.htaccess`）
-- ✅ 正常的佈景主題和外掛
-- ✅ 所有上傳的圖片、影片、文件
-- ✅ 備份檔案
-- ✅ 正常的系統服務
-
-## 掃描結果範例
-
-========================================
-VPS 安全掃描與清除工具 v1.0.0
-[1/10] 掃描惡意 Process...
-✗ 發現 15 個可疑 process
-正在清除惡意 process...
-✓ 已清除
-
-[2/10] 檢查對外連線...
-總對外連線數: 25
-✓ 連線狀況正常
-
-[3/10] 掃描 WordPress uploads 目錄...
-✗ 發現 3 個可疑 PHP 檔案
-正在刪除...
-✓ 已清除
-
-...
-
-========================================
-掃描結果總結
-發現威脅: 18
-已清除威脅: 18
-需手動處理: 0
-
-✓ 所有威脅已自動清除！
-
-
-## 後續建議動作
-
-完成掃描後，建議執行以下動作加強安全性：
-
-1. **安裝 Wordfence**：在所有 WordPress 網站安裝並執行完整掃描
-2. **更新系統**：更新 WordPress 核心、所有外掛、佈景主題
-3. **更換密碼**：更換 WP admin、資料庫、SSH、FTP 所有密碼
-4. **安裝 Fail2Ban**：防止 SSH 暴力破解
-5. **停用 XML-RPC**：如果不需要，請在 WordPress 停用 XML-RPC
-
-## 系統需求
-
-- Linux (Ubuntu, Debian, CentOS, AlmaLinux 等)
-- Root 權限
-- Bash shell
-
-## License
-
-MIT License - 自由使用、修改、分發
-
-## 貢獻
-
-歡迎提交 Issue 或 Pull Request！
-
-## 免責聲明
-
-此工具僅供合法的系統管理使用。使用前請確保你有權限在該伺服器上執行安全掃描。作者不對使用此工具造成的任何損失負責。
-
-## 支援
-
-如有問題請開 Issue 或聯繫作者。
-
 
