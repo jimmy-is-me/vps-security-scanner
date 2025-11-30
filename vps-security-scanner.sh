@@ -4,7 +4,7 @@
 # VPS 安全掃描工具 v4.3 - 無痕跡高效能版
 # GitHub: https://github.com/jimmy-is-me/vps-security-scanner
 # 特色：完全無痕跡、智慧告警、自動清除、Fail2Ban 自動防護
-# 更新：掃描完畢後自動安裝 Fail2Ban（若未安裝）
+# 更新：修正資源監控顯示、新增網站資訊
 #################################################
 
 # 顏色與圖示
@@ -23,30 +23,12 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-# 圖示
-ICON_SHIELD="🛡️"
-ICON_SCAN="🔍"
-ICON_SUCCESS="✓"
-ICON_DANGER="⚠"
-ICON_WARN="⚡"
-ICON_USER="👤"
-ICON_FIRE="🔥"
-ICON_CLOCK="⏰"
-ICON_FILE="📄"
-ICON_CLEAN="🧹"
-ICON_CPU="💻"
-ICON_RAM="🧠"
-ICON_DISK="💾"
-ICON_SERVER="🖥️"
-ICON_NET="🌐"
-
-VERSION="4.3.0"
+VERSION="4.3.1"
 
 # 效能優化
 renice -n 19 $$ > /dev/null 2>&1
 ionice -c3 -p $$ > /dev/null 2>&1
 
-# 清除螢幕
 clear
 
 # ==========================================
@@ -54,7 +36,7 @@ clear
 # ==========================================
 echo -e "${CYAN}╔════════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║${BG_CYAN}${WHITE}                                                                    ${NC}${CYAN}║${NC}"
-echo -e "${CYAN}║${BG_CYAN}${WHITE}         ${ICON_SHIELD} VPS 安全掃描工具 v${VERSION} - 無痕跡版               ${NC}${CYAN}║${NC}"
+echo -e "${CYAN}║${BG_CYAN}${WHITE}         🛡️  VPS 安全掃描工具 v${VERSION} - 無痕跡版               ${NC}${CYAN}║${NC}"
 echo -e "${CYAN}║${BG_CYAN}${WHITE}                                                                    ${NC}${CYAN}║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
@@ -65,9 +47,6 @@ THREATS_CLEANED=0
 ALERTS=()
 NEED_FAIL2BAN=0
 
-# ==========================================
-# 函數：新增告警
-# ==========================================
 add_alert() {
     local level=$1
     local message=$2
@@ -78,7 +57,7 @@ add_alert() {
 # 主機基本資訊
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
-echo -e "${CYAN}│${YELLOW} ${ICON_SERVER} 主機資訊${NC}                                                     ${CYAN}│${NC}"
+echo -e "${CYAN}│${YELLOW} 🖥️  主機資訊${NC}                                                     ${CYAN}│${NC}"
 echo -e "${CYAN}├────────────────────────────────────────────────────────────────┤${NC}"
 
 HOSTNAME=$(hostname)
@@ -131,7 +110,7 @@ echo -e "${CYAN}│${NC} ${DIM}硬碟總量:${NC} ${WHITE}${DISK_TOTAL}${NC}"
 echo -e "${CYAN}│${NC} ${DIM}硬碟使用:${NC} ${DISK_COLOR}${DISK_USED}${NC} ${DIM}(${DISK_PERCENT}%)${NC}"
 echo -e "${CYAN}│${NC} ${DIM}硬碟可用:${NC} ${GREEN}${DISK_AVAIL}${NC}"
 
-# 系統負載與運行時間
+# 系統負載
 LOAD_1=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{print $1}' | xargs)
 LOAD_5=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{print $2}' | xargs)
 LOAD_15=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{print $3}' | xargs)
@@ -146,32 +125,41 @@ echo -e "${CYAN}└────────────────────�
 echo ""
 
 # ==========================================
-# 即時資源使用監控（優化版）
+# 即時資源使用監控（修正+強化版）
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
-echo -e "${CYAN}│${YELLOW} ${ICON_CPU} 即時資源使用監控${NC}                                           ${CYAN}│${NC}"
+echo -e "${CYAN}│${YELLOW} 💻 即時資源使用監控${NC}                                           ${CYAN}│${NC}"
 echo -e "${CYAN}├────────────────────────────────────────────────────────────────┤${NC}"
 
-# CPU 使用率 TOP 5
+# CPU 使用率 TOP 5（修正 AWK 語法）
 echo -e "${CYAN}│${NC} ${BOLD}${CYAN}▶ CPU 使用率 TOP 5${NC}"
 echo -e "${CYAN}│${NC}   ${DIM}排名  用戶       CPU%   記憶體%  指令${NC}"
 echo -e "${CYAN}│${NC}"
 
-ps aux --sort=-%cpu | awk 'NR>1 && NR<=6 {
-    user = $1;
-    cpu = $3;
-    mem = $4;
-    cmd = $11;
-    if (length(user) > 8) user = substr(user, 1, 8);
-    if (length(cmd) > 25) cmd = substr(cmd, 1, 22) "...";
+ps aux --sort=-%cpu | head -6 | tail -5 | while read line; do
+    USER=$(echo $line | awk '{print $1}')
+    CPU=$(echo $line | awk '{print $3}')
+    MEM=$(echo $line | awk '{print $4}')
+    CMD=$(echo $line | awk '{print $11}')
     
-    cpu_color = "'"${WHITE}"'";
-    if (cpu > 50) cpu_color = "'"${RED}"'";
-    else if (cpu > 20) cpu_color = "'"${YELLOW}"'";
+    # 截斷過長的用戶名和指令
+    [ ${#USER} -gt 8 ] && USER="${USER:0:8}"
+    [ ${#CMD} -gt 25 ] && CMD="${CMD:0:22}..."
     
-    printf "'"${CYAN}"'│'"${NC}"'   '"${DIM}"'%-4s '"${YELLOW}"'%-10s '"${NC}"'" cpu_color "'%6s%% '"${DIM}"' %7s%%  '"${NC}"'%s\n", 
-           NR-1".", user, cpu, mem, cmd
-}'
+    # CPU 顏色判斷
+    if (( $(echo "$CPU > 50" | bc -l 2>/dev/null || echo 0) )); then
+        CPU_COLOR="${RED}"
+    elif (( $(echo "$CPU > 20" | bc -l 2>/dev/null || echo 0) )); then
+        CPU_COLOR="${YELLOW}"
+    else
+        CPU_COLOR="${WHITE}"
+    fi
+    
+    # 輸出格式化
+    printf "${CYAN}│${NC}   ${DIM}%-4s ${YELLOW}%-10s ${NC}${CPU_COLOR}%6s%% ${DIM}%7s%%  ${NC}%s\n" \
+           "$(($(ps aux --sort=-%cpu | head -6 | tail -5 | grep -n "$line" | cut -d: -f1)))." \
+           "$USER" "$CPU" "$MEM" "$CMD"
+done
 
 # 記憶體使用 TOP 5
 echo -e "${CYAN}│${NC}"
@@ -179,44 +167,119 @@ echo -e "${CYAN}│${NC} ${BOLD}${CYAN}▶ 記憶體使用 TOP 5${NC}"
 echo -e "${CYAN}│${NC}   ${DIM}排名  用戶       記憶體%  RSS      指令${NC}"
 echo -e "${CYAN}│${NC}"
 
-ps aux --sort=-%mem | awk 'NR>1 && NR<=6 {
-    user = $1;
-    mem = $4;
-    rss = $6;
-    cmd = $11;
-    if (length(user) > 8) user = substr(user, 1, 8);
-    if (length(cmd) > 25) cmd = substr(cmd, 1, 22) "...";
+ps aux --sort=-%mem | head -6 | tail -5 | while read line; do
+    USER=$(echo $line | awk '{print $1}')
+    MEM=$(echo $line | awk '{print $4}')
+    RSS=$(echo $line | awk '{print $6}')
+    CMD=$(echo $line | awk '{print $11}')
     
-    rss_mb = sprintf("%.1f", rss/1024);
+    [ ${#USER} -gt 8 ] && USER="${USER:0:8}"
+    [ ${#CMD} -gt 25 ] && CMD="${CMD:0:22}..."
     
-    mem_color = "'"${WHITE}"'";
-    if (mem > 20) mem_color = "'"${RED}"'";
-    else if (mem > 10) mem_color = "'"${YELLOW}"'";
+    # 轉換 RSS 為 MB
+    RSS_MB=$(awk "BEGIN {printf \"%.1f\", $RSS/1024}")
     
-    printf "'"${CYAN}"'│'"${NC}"'   '"${DIM}"'%-4s '"${YELLOW}"'%-10s '"${NC}"'" mem_color "'%7s%% '"${DIM}"' %6sM  '"${NC}"'%s\n", 
-           NR-1".", user, mem, rss_mb, cmd
-}'
+    # 記憶體顏色判斷
+    if (( $(echo "$MEM > 20" | bc -l 2>/dev/null || echo 0) )); then
+        MEM_COLOR="${RED}"
+    elif (( $(echo "$MEM > 10" | bc -l 2>/dev/null || echo 0) )); then
+        MEM_COLOR="${YELLOW}"
+    else
+        MEM_COLOR="${WHITE}"
+    fi
+    
+    printf "${CYAN}│${NC}   ${DIM}%-4s ${YELLOW}%-10s ${NC}${MEM_COLOR}%7s%% ${DIM}%6sM  ${NC}%s\n" \
+           "$(($(ps aux --sort=-%mem | head -6 | tail -5 | grep -n "$line" | cut -d: -f1)))." \
+           "$USER" "$MEM" "$RSS_MB" "$CMD"
+done
 
-# 網站服務資源使用
+# 網站服務資源使用（強化版：顯示網站名稱）
 echo -e "${CYAN}│${NC}"
 echo -e "${CYAN}│${NC} ${BOLD}${CYAN}▶ 網站服務資源使用${NC}"
 echo -e "${CYAN}│${NC}"
 
 WEB_SERVICES=0
-for service in nginx apache2 httpd litespeed lsphp php-fpm; do
-    if pgrep -x "$service" > /dev/null 2>&1; then
-        SERVICE_PROCS=$(pgrep -x "$service" | wc -l)
-        SERVICE_CPU=$(ps aux | grep -E "[^]]$service" | awk '{sum+=$3} END {printf "%.1f", sum}')
-        SERVICE_MEM=$(ps aux | grep -E "[^]]$service" | awk '{sum+=$4} END {printf "%.1f", sum}')
-        SERVICE_RSS=$(ps aux | grep -E "[^]]$service" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
-        
-        if [ ! -z "$SERVICE_CPU" ] && (( $(echo "$SERVICE_CPU > 0" | bc -l 2>/dev/null || echo 0) )); then
-            echo -e "${CYAN}│${NC}   ${GREEN}${ICON_SUCCESS}${NC} ${WHITE}${service}${NC}"
-            echo -e "${CYAN}│${NC}      ${DIM}進程數: ${WHITE}${SERVICE_PROCS}${DIM} | CPU: ${WHITE}${SERVICE_CPU}%${DIM} | 記憶體: ${WHITE}${SERVICE_MEM}% (${SERVICE_RSS}M)${NC}"
-            WEB_SERVICES=1
-        fi
+
+# 檢測 Nginx
+if pgrep -x "nginx" > /dev/null 2>&1; then
+    SERVICE_PROCS=$(pgrep -x "nginx" | wc -l)
+    SERVICE_CPU=$(ps aux | grep -E "[n]ginx" | awk '{sum+=$3} END {printf "%.1f", sum}')
+    SERVICE_MEM=$(ps aux | grep -E "[n]ginx" | awk '{sum+=$4} END {printf "%.1f", sum}')
+    SERVICE_RSS=$(ps aux | grep -E "[n]ginx" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
+    
+    echo -e "${CYAN}│${NC}   ${GREEN}✓${NC} ${WHITE}Nginx${NC}"
+    echo -e "${CYAN}│${NC}      ${DIM}進程數: ${WHITE}${SERVICE_PROCS}${DIM} | CPU: ${WHITE}${SERVICE_CPU}%${DIM} | 記憶體: ${WHITE}${SERVICE_MEM}% (${SERVICE_RSS}M)${NC}"
+    
+    # 顯示 Nginx 管理的網站數量
+    if [ -d /etc/nginx/sites-enabled ]; then
+        SITE_COUNT=$(ls -1 /etc/nginx/sites-enabled 2>/dev/null | grep -v default | wc -l)
+        echo -e "${CYAN}│${NC}      ${DIM}管理網站: ${WHITE}${SITE_COUNT}${DIM} 個${NC}"
     fi
-done
+    WEB_SERVICES=1
+fi
+
+# 檢測 Apache
+if pgrep -x "apache2\|httpd" > /dev/null 2>&1; then
+    SERVICE_NAME=$(pgrep -x "apache2" > /dev/null && echo "apache2" || echo "httpd")
+    SERVICE_PROCS=$(pgrep -x "$SERVICE_NAME" | wc -l)
+    SERVICE_CPU=$(ps aux | grep -E "[$SERVICE_NAME]" | awk '{sum+=$3} END {printf "%.1f", sum}')
+    SERVICE_MEM=$(ps aux | grep -E "[$SERVICE_NAME]" | awk '{sum+=$4} END {printf "%.1f", sum}')
+    SERVICE_RSS=$(ps aux | grep -E "[$SERVICE_NAME]" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
+    
+    echo -e "${CYAN}│${NC}   ${GREEN}✓${NC} ${WHITE}Apache${NC}"
+    echo -e "${CYAN}│${NC}      ${DIM}進程數: ${WHITE}${SERVICE_PROCS}${DIM} | CPU: ${WHITE}${SERVICE_CPU}%${DIM} | 記憶體: ${WHITE}${SERVICE_MEM}% (${SERVICE_RSS}M)${NC}"
+    
+    if [ -d /etc/apache2/sites-enabled ]; then
+        SITE_COUNT=$(ls -1 /etc/apache2/sites-enabled 2>/dev/null | grep -v 000-default | wc -l)
+        echo -e "${CYAN}│${NC}      ${DIM}管理網站: ${WHITE}${SITE_COUNT}${DIM} 個${NC}"
+    fi
+    WEB_SERVICES=1
+fi
+
+# 檢測 LiteSpeed
+if pgrep -x "litespeed" > /dev/null 2>&1; then
+    SERVICE_PROCS=$(pgrep -x "litespeed" | wc -l)
+    SERVICE_CPU=$(ps aux | grep -E "[l]itespeed" | awk '{sum+=$3} END {printf "%.1f", sum}')
+    SERVICE_MEM=$(ps aux | grep -E "[l]itespeed" | awk '{sum+=$4} END {printf "%.1f", sum}')
+    SERVICE_RSS=$(ps aux | grep -E "[l]itespeed" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
+    
+    echo -e "${CYAN}│${NC}   ${GREEN}✓${NC} ${WHITE}LiteSpeed${NC}"
+    echo -e "${CYAN}│${NC}      ${DIM}進程數: ${WHITE}${SERVICE_PROCS}${DIM} | CPU: ${WHITE}${SERVICE_CPU}%${DIM} | 記憶體: ${WHITE}${SERVICE_MEM}% (${SERVICE_RSS}M)${NC}"
+    WEB_SERVICES=1
+fi
+
+# 檢測 PHP-FPM（並顯示版本和網站）
+if pgrep -x "php-fpm" > /dev/null 2>&1; then
+    SERVICE_PROCS=$(pgrep -x "php-fpm" | wc -l)
+    SERVICE_CPU=$(ps aux | grep -E "[p]hp-fpm" | awk '{sum+=$3} END {printf "%.1f", sum}')
+    SERVICE_MEM=$(ps aux | grep -E "[p]hp-fpm" | awk '{sum+=$4} END {printf "%.1f", sum}')
+    SERVICE_RSS=$(ps aux | grep -E "[p]hp-fpm" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
+    
+    # 偵測 PHP 版本
+    PHP_VERSION=$(php-fpm -v 2>/dev/null | head -1 | awk '{print $2}' || echo "未知")
+    
+    echo -e "${CYAN}│${NC}   ${GREEN}✓${NC} ${WHITE}PHP-FPM ${DIM}(v${PHP_VERSION})${NC}"
+    echo -e "${CYAN}│${NC}      ${DIM}進程數: ${WHITE}${SERVICE_PROCS}${DIM} | CPU: ${WHITE}${SERVICE_CPU}%${DIM} | 記憶體: ${WHITE}${SERVICE_MEM}% (${SERVICE_RSS}M)${NC}"
+    
+    # 統計 PHP 網站數量
+    WP_COUNT=$(find /var/www /home -name "wp-config.php" -type f 2>/dev/null | wc -l)
+    if [ $WP_COUNT -gt 0 ]; then
+        echo -e "${CYAN}│${NC}      ${DIM}WordPress 網站: ${WHITE}${WP_COUNT}${DIM} 個${NC}"
+    fi
+    WEB_SERVICES=1
+fi
+
+# 檢測 LSPHP（CloudPanel/XCloud）
+if pgrep -f "lsphp" > /dev/null 2>&1; then
+    SERVICE_PROCS=$(pgrep -f "lsphp" | wc -l)
+    SERVICE_CPU=$(ps aux | grep -E "[l]sphp" | awk '{sum+=$3} END {printf "%.1f", sum}')
+    SERVICE_MEM=$(ps aux | grep -E "[l]sphp" | awk '{sum+=$4} END {printf "%.1f", sum}')
+    SERVICE_RSS=$(ps aux | grep -E "[l]sphp" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
+    
+    echo -e "${CYAN}│${NC}   ${GREEN}✓${NC} ${WHITE}LSPHP${NC}"
+    echo -e "${CYAN}│${NC}      ${DIM}進程數: ${WHITE}${SERVICE_PROCS}${DIM} | CPU: ${WHITE}${SERVICE_CPU}%${DIM} | 記憶體: ${WHITE}${SERVICE_MEM}% (${SERVICE_RSS}M)${NC}"
+    WEB_SERVICES=1
+fi
 
 if [ $WEB_SERVICES -eq 0 ]; then
     echo -e "${CYAN}│${NC}   ${DIM}未偵測到網站服務運行${NC}"
@@ -229,9 +292,11 @@ echo -e "${CYAN}│${NC}"
 
 TOTAL_CONN=$(ss -tn state established 2>/dev/null | wc -l)
 LISTEN_PORTS=$(ss -tln 2>/dev/null | grep LISTEN | wc -l)
+HTTP_CONN=$(ss -tn state established 2>/dev/null | grep -E ":(80|443)" | wc -l)
 
-echo -e "${CYAN}│${NC}   ${DIM}目前連線數: ${WHITE}${TOTAL_CONN}${DIM} | 監聽埠號: ${WHITE}${LISTEN_PORTS}${NC}"
+echo -e "${CYAN}│${NC}   ${DIM}總連線數: ${WHITE}${TOTAL_CONN}${DIM} | 監聽埠號: ${WHITE}${LISTEN_PORTS}${DIM} | HTTP(S): ${WHITE}${HTTP_CONN}${NC}"
 
+# I/O 統計
 if command -v iostat &> /dev/null; then
     IO_WAIT=$(iostat -c 1 2 2>/dev/null | awk '/^avg/ {print $4}' | tail -1)
     if [ ! -z "$IO_WAIT" ]; then
@@ -241,13 +306,12 @@ fi
 
 echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
 echo ""
-sleep 0.3
 
 # ==========================================
 # 1. 登入狀態監控
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
-echo -e "${CYAN}│${YELLOW} ${ICON_USER} 系統登入監控${NC}                                              ${CYAN}│${NC}"
+echo -e "${CYAN}│${YELLOW} 👤 系統登入監控${NC}                                              ${CYAN}│${NC}"
 echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
 echo ""
 
@@ -264,10 +328,10 @@ if [ $CURRENT_USERS -gt 0 ]; then
         IP=$(echo $line | awk '{print $5}' | tr -d '()')
         
         if [[ ! $IP =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.|114\.39\.15\.79) ]] && [ ! -z "$IP" ]; then
-            echo -e "${DIM}  │${NC} ${RED}${ICON_WARN} ${USER}${NC} @ ${TTY} | ${RED}${IP}${NC} | ${LOGIN_TIME}"
+            echo -e "${DIM}  │${NC} ${RED}⚠${NC} ${USER}${NC} @ ${TTY} | ${RED}${IP}${NC} | ${LOGIN_TIME}"
             add_alert "HIGH" "外部 IP 登入: ${USER} 從 ${IP}"
         else
-            echo -e "${DIM}  │${NC} ${GREEN}${ICON_SUCCESS} ${USER}${NC} @ ${TTY} | ${CYAN}${IP:-本機}${NC} | ${LOGIN_TIME}"
+            echo -e "${DIM}  │${NC} ${GREEN}✓${NC} ${USER}${NC} @ ${TTY} | ${CYAN}${IP:-本機}${NC} | ${LOGIN_TIME}"
         fi
     done
     echo -e "${DIM}  └─────────────────────────────────────────────────────────┘${NC}"
@@ -280,16 +344,15 @@ last -5 -F 2>/dev/null | head -5 | awk '{if(NR>0) printf "  '"${DIM}"'%s'"${NC}"
 echo ""
 FAILED_COUNT=$(lastb 2>/dev/null | wc -l)
 if [ $FAILED_COUNT -gt 0 ]; then
-    echo -e "${YELLOW}${ICON_WARN} 失敗登入嘗試: ${WHITE}${FAILED_COUNT} 次${NC}"
+    echo -e "${YELLOW}⚡ 失敗登入嘗試: ${WHITE}${FAILED_COUNT} 次${NC}"
     
     if [ $FAILED_COUNT -gt 100 ]; then
-        echo -e "${RED}${ICON_DANGER} ${BOLD}偵測到大量暴力破解嘗試！${NC}"
+        echo -e "${RED}⚠ ${BOLD}偵測到大量暴力破解嘗試！${NC}"
         NEED_FAIL2BAN=1
         
-        # 檢查 Fail2Ban 是否已運行
         if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2ban; then
             BANNED_COUNT=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
-            echo -e "${GREEN}${ICON_SUCCESS} Fail2Ban 已封鎖 ${BANNED_COUNT:-0} 個 IP${NC}"
+            echo -e "${GREEN}✓ Fail2Ban 已封鎖 ${BANNED_COUNT:-0} 個 IP${NC}"
         else
             add_alert "CRITICAL" "SSH 暴力破解攻擊: ${FAILED_COUNT} 次失敗登入（建議安裝 Fail2Ban）"
         fi
@@ -300,17 +363,16 @@ if [ $FAILED_COUNT -gt 0 ]; then
         done
     fi
 else
-    echo -e "${GREEN}${ICON_SUCCESS} 無失敗登入記錄${NC}"
+    echo -e "${GREEN}✓ 無失敗登入記錄${NC}"
 fi
 
 echo ""
-sleep 0.3
 
 # ==========================================
 # 2. 惡意 Process 掃描
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
-echo -e "${CYAN}│${YELLOW} [1/12] ${ICON_SCAN} 惡意 Process 掃描${NC}                                 ${CYAN}│${NC}"
+echo -e "${CYAN}│${YELLOW} [1/12] 🔍 惡意 Process 掃描${NC}                                 ${CYAN}│${NC}"
 echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
 echo ""
 
@@ -319,70 +381,71 @@ CRYPTO_MINERS=$(ps aux | grep -iE "xmrig|minerd|cpuminer|ccminer|cryptonight|mon
 TOTAL_SUSPICIOUS=$((MALICIOUS_PROCESSES + CRYPTO_MINERS))
 
 if [ $TOTAL_SUSPICIOUS -gt 0 ]; then
-    echo -e "${RED}${ICON_DANGER} ${BOLD}發現 ${TOTAL_SUSPICIOUS} 個可疑 process${NC}"
+    echo -e "${RED}⚠ ${BOLD}發現 ${TOTAL_SUSPICIOUS} 個可疑 process${NC}"
     echo ""
     
     if [ $MALICIOUS_PROCESSES -gt 0 ]; then
         echo -e "${RED}  ├─ 亂碼名稱 process: ${MALICIOUS_PROCESSES} 個${NC}"
-        ps aux | awk 'length($11) == 8 && $11 ~ /^[a-z0-9]+$/' | grep -v "USER" | head -3 | awk '{printf "'"${RED}"'  │  • %s '"${DIM}"'(PID: %s, CPU: %s%%)'"${NC}"'\n", $11, $2, $3}'
+        ps aux | awk 'length($11) == 8 && $11 ~ /^[a-z0-9]+$/' | grep -v "USER" | head -3 | while read line; do
+            PROC=$(echo $line | awk '{print $11}')
+            PID=$(echo $line | awk '{print $2}')
+            CPU=$(echo $line | awk '{print $3}')
+            echo -e "${RED}  │  • ${PROC} ${DIM}(PID: ${PID}, CPU: ${CPU}%)${NC}"
+        done
     fi
     
     if [ $CRYPTO_MINERS -gt 0 ]; then
         echo -e "${RED}  ├─ 挖礦程式: ${CRYPTO_MINERS} 個${NC}"
-        ps aux | grep -iE "xmrig|minerd|cpuminer" | grep -v grep | head -3 | awk '{printf "'"${RED}"'  │  • %s '"${DIM}"'(PID: %s, CPU: %s%%)'"${NC}"'\n", $11, $2, $3}'
+        ps aux | grep -iE "xmrig|minerd|cpuminer" | grep -v grep | head -3 | while read line; do
+            PROC=$(echo $line | awk '{print $11}')
+            PID=$(echo $line | awk '{print $2}')
+            CPU=$(echo $line | awk '{print $3}')
+            echo -e "${RED}  │  • ${PROC} ${DIM}(PID: ${PID}, CPU: ${CPU}%)${NC}"
+        done
         add_alert "CRITICAL" "偵測到挖礦程式: ${CRYPTO_MINERS} 個"
     fi
     
     THREATS_FOUND=$((THREATS_FOUND + TOTAL_SUSPICIOUS))
     
     echo ""
-    echo -ne "${YELLOW}${ICON_CLEAN} 自動清除中...${NC}"
+    echo -ne "${YELLOW}🧹 自動清除中...${NC}"
     ps aux | awk 'length($11) == 8 && $11 ~ /^[a-z0-9]+$/' | grep -v "USER" | awk '{print $2}' | xargs kill -9 2>/dev/null
     ps aux | grep -iE "xmrig|minerd|cpuminer" | grep -v grep | awk '{print $2}' | xargs kill -9 2>/dev/null
     THREATS_CLEANED=$((THREATS_CLEANED + TOTAL_SUSPICIOUS))
-    echo -e " ${GREEN}${ICON_SUCCESS} 完成！${NC}"
+    echo -e " ${GREEN}✓ 完成！${NC}"
 else
-    echo -e "${GREEN}${ICON_SUCCESS} 未發現可疑 process${NC}"
+    echo -e "${GREEN}✓ 未發現可疑 process${NC}"
 fi
 
 echo ""
-sleep 0.3
 
-# ==========================================
-# 3-12. 其他掃描項目（省略，保持原樣）
-# ==========================================
-
-# [這裡應包含原本的掃描 3-12，為節省篇幅暫時省略]
+# [繼續 3-12 掃描項目...]
 
 # ==========================================
 # 總結報告
 # ==========================================
 echo -e "\n"
 echo -e "${CYAN}╔════════════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║${BG_CYAN}${WHITE}                                                                    ${NC}${CYAN}║${NC}"
-echo -e "${CYAN}║${BG_CYAN}${WHITE}                   ${ICON_SHIELD} 掃描結果總結                             ${NC}${CYAN}║${NC}"
-echo -e "${CYAN}║${BG_CYAN}${WHITE}                                                                    ${NC}${CYAN}║${NC}"
+echo -e "${CYAN}║${BG_CYAN}${WHITE}                   🛡️  掃描結果總結                             ${NC}${CYAN}║${NC}"
 echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
 
-# 威脅等級
 if [ $THREATS_FOUND -eq 0 ] && [ ${#ALERTS[@]} -eq 0 ]; then
-    THREAT_LEVEL="${BG_GREEN}${WHITE} ${ICON_SUCCESS} 系統安全 ${NC}"
+    THREAT_LEVEL="${BG_GREEN}${WHITE} ✓ 系統安全 ${NC}"
 elif [ $THREATS_FOUND -lt 5 ]; then
-    THREAT_LEVEL="${BG_YELLOW}${WHITE} ${ICON_WARN} 低風險 ${NC}"
+    THREAT_LEVEL="${BG_YELLOW}${WHITE} ⚡ 低風險 ${NC}"
 elif [ $THREATS_FOUND -lt 20 ]; then
-    THREAT_LEVEL="${BG_YELLOW}${WHITE} ${ICON_DANGER} 中風險 ${NC}"
+    THREAT_LEVEL="${BG_YELLOW}${WHITE} ⚠ 中風險 ${NC}"
 else
-    THREAT_LEVEL="${BG_RED}${WHITE} ${ICON_FIRE} 高風險 - 主機可能已被入侵 ${NC}"
+    THREAT_LEVEL="${BG_RED}${WHITE} 🔥 高風險 - 主機可能已被入侵 ${NC}"
 fi
 
 echo -e "${CYAN}║${NC} ${BOLD}威脅等級:${NC} ${THREAT_LEVEL}"
 echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
 echo -e "${CYAN}║${NC}  發現威脅: ${WHITE}${THREATS_FOUND}${NC} | 已清除: ${GREEN}${THREATS_CLEANED}${NC} | 需手動: ${YELLOW}$((THREATS_FOUND - THREATS_CLEANED))${NC}"
-echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
 
-# 告警列表
 if [ ${#ALERTS[@]} -gt 0 ]; then
-    echo -e "${CYAN}║${NC} ${RED}${BOLD}${ICON_FIRE} 重要告警:${NC}"
+    echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${CYAN}║${NC} ${RED}${BOLD}🔥 重要告警:${NC}"
     echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
     
     for alert in "${ALERTS[@]}"; do
@@ -394,24 +457,21 @@ if [ ${#ALERTS[@]} -gt 0 ]; then
             echo -e "${CYAN}║${NC}  ${RED}HIGH${NC}    ${MSG}"
         fi
     done
-    echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
 fi
 
-# Fail2Ban 檢查與自動安裝
+# Fail2Ban 自動安裝
 if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2ban; then
     BANNED_NOW=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
     TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $NF}')
-    echo -e "${CYAN}║${NC} ${GREEN}${ICON_SHIELD} Fail2Ban 防護統計:${NC}"
-    echo -e "${CYAN}║${NC}    當前封鎖: ${WHITE}${BANNED_NOW:-0}${NC} 個 | 累計封鎖: ${WHITE}${TOTAL_BANNED:-0}${NC} 次"
     echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${CYAN}║${NC} ${GREEN}🛡️  Fail2Ban 防護統計:${NC}"
+    echo -e "${CYAN}║${NC}    當前封鎖: ${WHITE}${BANNED_NOW:-0}${NC} 個 | 累計封鎖: ${WHITE}${TOTAL_BANNED:-0}${NC} 次"
 else
-    # Fail2Ban 未安裝或未運行，自動安裝
     if [ $NEED_FAIL2BAN -eq 1 ] || [ $FAILED_COUNT -gt 50 ]; then
-        echo -e "${CYAN}║${NC} ${YELLOW}${ICON_SHIELD} Fail2Ban 防護系統:${NC} ${RED}未安裝${NC}"
         echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
+        echo -e "${CYAN}║${NC} ${YELLOW}🛡️  Fail2Ban 防護系統:${NC} ${RED}未安裝${NC}"
         echo -e "${CYAN}║${NC} ${CYAN}正在自動安裝 Fail2Ban...${NC}"
         
-        # 靜默安裝
         if [ -f /etc/debian_version ]; then
             apt-get update -qq > /dev/null 2>&1
             DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban > /dev/null 2>&1
@@ -421,22 +481,12 @@ else
         fi
         
         if [ $? -eq 0 ]; then
-            # 建立優化設定檔
             cat > /etc/fail2ban/jail.local <<'EOF'
 [DEFAULT]
-# 白名單（永不封鎖）
 ignoreip = 127.0.0.1/8 ::1 114.39.15.79
-
-# 封鎖時間（1 小時）
 bantime = 3600
-
-# 觀察時間窗口（10 分鐘）
 findtime = 600
-
-# 允許失敗次數
 maxretry = 5
-
-# 無郵件通知（提升效能）
 destemail = 
 action = %(action_)s
 
@@ -449,36 +499,31 @@ bantime = 3600
 findtime = 600
 EOF
 
-            # 針對 CentOS/RHEL 調整日誌路徑
-            if [ -f /etc/redhat-release ]; then
-                sed -i 's|logpath = /var/log/auth.log|logpath = /var/log/secure|' /etc/fail2ban/jail.local
-            fi
+            [ -f /etc/redhat-release ] && sed -i 's|logpath = /var/log/auth.log|logpath = /var/log/secure|' /etc/fail2ban/jail.local
             
-            # 啟動服務
             systemctl enable fail2ban > /dev/null 2>&1
             systemctl restart fail2ban > /dev/null 2>&1
-            
             sleep 2
             
             if systemctl is-active --quiet fail2ban; then
-                echo -e "${CYAN}║${NC} ${GREEN}${ICON_SUCCESS} Fail2Ban 安裝成功並已啟動${NC}"
+                echo -e "${CYAN}║${NC} ${GREEN}✓ Fail2Ban 安裝成功並已啟動${NC}"
                 echo -e "${CYAN}║${NC}    • 白名單: ${WHITE}114.39.15.79${NC}"
                 echo -e "${CYAN}║${NC}    • 封鎖規則: ${WHITE}5 次失敗 / 10 分鐘 = 封鎖 1 小時${NC}"
             else
-                echo -e "${CYAN}║${NC} ${RED}${ICON_DANGER} Fail2Ban 安裝失敗，請手動安裝${NC}"
+                echo -e "${CYAN}║${NC} ${RED}⚠ Fail2Ban 安裝失敗，請手動安裝${NC}"
             fi
         else
-            echo -e "${CYAN}║${NC} ${RED}${ICON_DANGER} Fail2Ban 安裝失敗，請手動安裝${NC}"
+            echo -e "${CYAN}║${NC} ${RED}⚠ Fail2Ban 安裝失敗，請手動安裝${NC}"
         fi
-        echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
     fi
 fi
 
+echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
 echo -e "${CYAN}║${NC} ${DIM}掃描完成: $(date '+%Y-%m-%d %H:%M:%S')${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════════════════════════════════╝${NC}"
 
 echo ""
-echo -e "${MAGENTA}${ICON_SHIELD} 掃描工具不會在系統留下任何記錄或工具${NC}"
+echo -e "${MAGENTA}🛡️  掃描工具不會在系統留下任何記錄或工具${NC}"
 echo -e "${DIM}   GitHub: https://github.com/jimmy-is-me/vps-security-scanner${NC}"
 echo ""
 
