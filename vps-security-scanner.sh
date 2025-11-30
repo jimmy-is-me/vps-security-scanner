@@ -1,10 +1,10 @@
 #!/bin/bash
 
 #################################################
-# VPS 安全掃描工具 v4.3.2 - 無痕跡高效能版
+# VPS 安全掃描工具 v4.3.3 - 無痕跡高效能版
 # GitHub: https://github.com/jimmy-is-me/vps-security-scanner
 # 特色：完全無痕跡、智慧告警、自動清除、Fail2Ban 自動防護
-# 更新：修正資源監控、顯示封鎖 IP、重置失敗登入記錄
+# 更新：完全修正 AWK 語法錯誤
 #################################################
 
 # 顏色與圖示
@@ -23,7 +23,7 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="4.3.2"
+VERSION="4.3.3"
 
 # 效能優化
 renice -n 19 $$ > /dev/null 2>&1
@@ -125,48 +125,64 @@ echo -e "${CYAN}└────────────────────�
 echo ""
 
 # ==========================================
-# 即時資源使用監控（完全修正版）
+# 即時資源使用監控（完全重寫，避免 AWK 巢狀引號）
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
 echo -e "${CYAN}│${YELLOW} 💻 即時資源使用監控${NC}                                           ${CYAN}│${NC}"
 echo -e "${CYAN}├────────────────────────────────────────────────────────────────┤${NC}"
 
-# CPU 使用率 TOP 5
+# CPU 使用率 TOP 5（改用 while read 避免 AWK 字串問題）
 echo -e "${CYAN}│${NC} ${BOLD}${CYAN}▶ CPU 使用率 TOP 5${NC}"
 echo -e "${CYAN}│${NC}   ${DIM}排名  用戶       CPU%   記憶體%  指令${NC}"
 
-ps aux --sort=-%cpu | awk 'NR>1 && NR<=6 {
-    user = substr($1, 1, 8);
-    cpu = $3;
-    mem = $4;
-    cmd = substr($11, 1, 25);
+ps aux --sort=-%cpu | head -6 | tail -5 | while IFS= read -r line; do
+    USER=$(echo "$line" | awk '{print $1}' | cut -c1-8)
+    CPU=$(echo "$line" | awk '{print $3}')
+    MEM=$(echo "$line" | awk '{print $4}')
+    CMD=$(echo "$line" | awk '{print $11}' | cut -c1-25)
+    RANK=$((${RANK:-0} + 1))
     
-    if (cpu > 50) cpu_color = "'"${RED}"'";
-    else if (cpu > 20) cpu_color = "'"${YELLOW}"'";
-    else cpu_color = "'"${WHITE}"'";
+    # CPU 顏色判斷（改用 bash 條件）
+    if (( $(echo "$CPU > 50" | bc -l 2>/dev/null || echo 0) )); then
+        CPU_COLOR="${RED}"
+    elif (( $(echo "$CPU > 20" | bc -l 2>/dev/null || echo 0) )); then
+        CPU_COLOR="${YELLOW}"
+    else
+        CPU_COLOR="${WHITE}"
+    fi
     
-    printf "'"${CYAN}"'│'"${NC}"'   '"${DIM}"'%-4s '"${YELLOW}"'%-10s '"${NC}"'" cpu_color "'%6.1f%% '"${DIM}"' %6.1f%%  '"${NC}"'%s\n", 
-           (NR-1)".", user, cpu, mem, cmd;
-}'
+    printf "${CYAN}│${NC}   ${DIM}%-4s ${YELLOW}%-10s ${NC}${CPU_COLOR}%6.1f%% ${DIM}%6.1f%%  ${NC}%s\n" \
+           "${RANK}." "$USER" "$CPU" "$MEM" "$CMD"
+done
 
 # 記憶體使用 TOP 5
 echo -e "${CYAN}│${NC}"
 echo -e "${CYAN}│${NC} ${BOLD}${CYAN}▶ 記憶體使用 TOP 5${NC}"
 echo -e "${CYAN}│${NC}   ${DIM}排名  用戶       記憶體%  RSS      指令${NC}"
 
-ps aux --sort=-%mem | awk 'NR>1 && NR<=6 {
-    user = substr($1, 1, 8);
-    mem = $4;
-    rss = sprintf("%.1f", $6/1024);
-    cmd = substr($11, 1, 25);
+RANK=0
+ps aux --sort=-%mem | head -6 | tail -5 | while IFS= read -r line; do
+    USER=$(echo "$line" | awk '{print $1}' | cut -c1-8)
+    MEM=$(echo "$line" | awk '{print $4}')
+    RSS=$(echo "$line" | awk '{print $6}')
+    CMD=$(echo "$line" | awk '{print $11}' | cut -c1-25)
+    RANK=$((${RANK:-0} + 1))
     
-    if (mem > 20) mem_color = "'"${RED}"'";
-    else if (mem > 10) mem_color = "'"${YELLOW}"'";
-    else mem_color = "'"${WHITE}"'";
+    # 轉換 RSS 為 MB
+    RSS_MB=$(awk "BEGIN {printf \"%.1f\", $RSS/1024}")
     
-    printf "'"${CYAN}"'│'"${NC}"'   '"${DIM}"'%-4s '"${YELLOW}"'%-10s '"${NC}"'" mem_color "'%7.1f%% '"${DIM}"' %6sM  '"${NC}"'%s\n", 
-           (NR-1)".", user, mem, rss, cmd;
-}'
+    # 記憶體顏色判斷
+    if (( $(echo "$MEM > 20" | bc -l 2>/dev/null || echo 0) )); then
+        MEM_COLOR="${RED}"
+    elif (( $(echo "$MEM > 10" | bc -l 2>/dev/null || echo 0) )); then
+        MEM_COLOR="${YELLOW}"
+    else
+        MEM_COLOR="${WHITE}"
+    fi
+    
+    printf "${CYAN}│${NC}   ${DIM}%-4s ${YELLOW}%-10s ${NC}${MEM_COLOR}%7.1f%% ${DIM}%6sM  ${NC}%s\n" \
+           "${RANK}." "$USER" "$MEM" "$RSS_MB" "$CMD"
+done
 
 # 網站服務資源使用
 echo -e "${CYAN}│${NC}"
@@ -388,7 +404,7 @@ if [ ${#ALERTS[@]} -gt 0 ]; then
     done
 fi
 
-# Fail2Ban 檢查與顯示封鎖 IP [web:88][web:89]
+# Fail2Ban 檢查與顯示封鎖 IP
 if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2ban; then
     echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC} ${GREEN}🛡️  Fail2Ban 防護統計:${NC}"
@@ -398,11 +414,10 @@ if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2b
     
     echo -e "${CYAN}║${NC}    當前封鎖: ${WHITE}${BANNED_NOW:-0}${NC} 個 | 累計封鎖: ${WHITE}${TOTAL_BANNED:-0}${NC} 次"
     
-    # 顯示封鎖的 IP 列表 [web:89][web:92]
     if [ "${BANNED_NOW:-0}" -gt 0 ]; then
         echo -e "${CYAN}║${NC} ${YELLOW}封鎖 IP 列表:${NC}"
-        fail2ban-client get sshd banip 2>/dev/null | while read ip; do
-            [ ! -z "$ip" ] && echo -e "${CYAN}║${NC}    ${RED}├─ ${ip}${NC}"
+        fail2ban-client status sshd 2>/dev/null | grep "Banned IP list" | awk -F: '{print $2}' | tr ' ' '\n' | grep -v "^$" | while read ip; do
+            echo -e "${CYAN}║${NC}    ${RED}├─ ${ip}${NC}"
         done
     fi
 else
@@ -467,23 +482,18 @@ echo -e "${DIM}   GitHub: https://github.com/jimmy-is-me/vps-security-scanner${N
 echo ""
 
 # ==========================================
-# 掃描完成後重置失敗登入記錄 [web:94]
+# 掃描完成後重置失敗登入記錄
 # ==========================================
 echo -ne "${YELLOW}🧹 清理失敗登入記錄...${NC}"
 
-# 方法 1: 使用 faillock (較新系統)
 if command -v faillock &> /dev/null; then
-    for user in $(faillock --list 2>/dev/null | grep -v "^When"); do
-        faillock --user "$user" --reset > /dev/null 2>&1
-    done
+    faillock --reset-all > /dev/null 2>&1
 fi
 
-# 方法 2: 使用 pam_tally2 (舊系統)
 if command -v pam_tally2 &> /dev/null; then
     pam_tally2 --reset > /dev/null 2>&1
 fi
 
-# 方法 3: 清空 lastb 記錄 (通用方法)
 echo -n > /var/log/btmp 2>/dev/null
 echo -n > /var/log/wtmp.1 2>/dev/null
 
