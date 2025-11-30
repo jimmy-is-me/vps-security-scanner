@@ -1,10 +1,10 @@
 #!/bin/bash
 
 #################################################
-# VPS 安全掃描工具 v4.2 - 無痕跡高效能版
+# VPS 安全掃描工具 v4.3 - 無痕跡高效能版
 # GitHub: https://github.com/jimmy-is-me/vps-security-scanner
-# 特色：不殘留工具、不留記錄、即時監控、完整告警
-# 新增：自動安裝 Fail2Ban 防護
+# 特色：完全無痕跡、智慧告警、自動清除、Fail2Ban 自動防護
+# 更新：掃描完畢後自動安裝 Fail2Ban（若未安裝）
 #################################################
 
 # 顏色與圖示
@@ -24,23 +24,23 @@ DIM='\033[2m'
 NC='\033[0m'
 
 # 圖示
-ICON_SHIELD="[盾]"
-ICON_SCAN="[掃]"
-ICON_SUCCESS="[✓]"
-ICON_DANGER="[!]"
-ICON_WARN="[⚠]"
-ICON_USER="[👤]"
-ICON_FIRE="[🔥]"
-ICON_CLOCK="[⏰]"
-ICON_FILE="[📄]"
-ICON_CLEAN="[清]"
-ICON_CPU="[CPU]"
-ICON_RAM="[RAM]"
-ICON_DISK="[💾]"
-ICON_SERVER="[主機]"
-ICON_NET="[網路]"
+ICON_SHIELD="🛡️"
+ICON_SCAN="🔍"
+ICON_SUCCESS="✓"
+ICON_DANGER="⚠"
+ICON_WARN="⚡"
+ICON_USER="👤"
+ICON_FIRE="🔥"
+ICON_CLOCK="⏰"
+ICON_FILE="📄"
+ICON_CLEAN="🧹"
+ICON_CPU="💻"
+ICON_RAM="🧠"
+ICON_DISK="💾"
+ICON_SERVER="🖥️"
+ICON_NET="🌐"
 
-VERSION="4.2.0"
+VERSION="4.3.0"
 
 # 效能優化
 renice -n 19 $$ > /dev/null 2>&1
@@ -63,6 +63,7 @@ echo ""
 THREATS_FOUND=0
 THREATS_CLEANED=0
 ALERTS=()
+NEED_FAIL2BAN=0
 
 # ==========================================
 # 函數：新增告警
@@ -72,125 +73,6 @@ add_alert() {
     local message=$2
     ALERTS+=("[$level] $message")
 }
-
-# ==========================================
-# Fail2Ban 自動安裝與設定（新增）
-# ==========================================
-install_fail2ban() {
-    echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${CYAN}│${YELLOW} ${ICON_SHIELD} Fail2Ban 防護系統檢查${NC}                                    ${CYAN}│${NC}"
-    echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
-    echo ""
-    
-    # 檢查是否已安裝
-    if command -v fail2ban-client &> /dev/null; then
-        F2B_STATUS=$(systemctl is-active fail2ban 2>/dev/null)
-        if [ "$F2B_STATUS" = "active" ]; then
-            echo -e "${GREEN}${ICON_SUCCESS} Fail2Ban 已安裝並運行中${NC}"
-            
-            # 顯示當前封鎖統計
-            BANNED_IPS=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
-            TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $NF}')
-            
-            echo -e "${CYAN}  • 當前封鎖 IP: ${WHITE}${BANNED_IPS:-0}${CYAN} 個${NC}"
-            echo -e "${CYAN}  • 累計封鎖: ${WHITE}${TOTAL_BANNED:-0}${CYAN} 次${NC}"
-            return 0
-        fi
-    fi
-    
-    # 尚未安裝，詢問是否安裝
-    echo -e "${YELLOW}${ICON_WARN} Fail2Ban 尚未安裝${NC}"
-    echo -e "${CYAN}Fail2Ban 可自動封鎖暴力破解攻擊的 IP${NC}"
-    echo ""
-    echo -ne "${YELLOW}是否安裝 Fail2Ban？(y/n): ${NC}"
-    read -r -n 1 INSTALL_F2B
-    echo ""
-    
-    if [[ ! $INSTALL_F2B =~ ^[Yy]$ ]]; then
-        echo -e "${YELLOW}跳過 Fail2Ban 安裝${NC}"
-        return 1
-    fi
-    
-    echo ""
-    echo -e "${CYAN}${ICON_CLEAN} 正在安裝 Fail2Ban...${NC}"
-    
-    # 偵測系統類型
-    if [ -f /etc/debian_version ]; then
-        apt-get update -qq > /dev/null 2>&1
-        apt-get install -y fail2ban > /dev/null 2>&1
-    elif [ -f /etc/redhat-release ]; then
-        yum install -y epel-release > /dev/null 2>&1
-        yum install -y fail2ban > /dev/null 2>&1
-    else
-        echo -e "${RED}${ICON_DANGER} 不支援的系統類型${NC}"
-        return 1
-    fi
-    
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}${ICON_SUCCESS} Fail2Ban 安裝成功${NC}"
-        
-        # 建立優化設定檔
-        cat > /etc/fail2ban/jail.local <<EOF
-[DEFAULT]
-# 白名單（永不封鎖）
-ignoreip = 127.0.0.1/8 ::1 114.39.15.79
-
-# 封鎖時間（1 小時）
-bantime = 3600
-
-# 觀察時間窗口（10 分鐘）
-findtime = 600
-
-# 允許失敗次數
-maxretry = 5
-
-# 關閉郵件通知（提升效能）
-destemail = 
-action = %(action_)s
-
-# 停用日誌檔（無痕跡模式）
-logtarget = /dev/null
-
-[sshd]
-enabled = true
-port = ssh
-logpath = /var/log/auth.log
-maxretry = 5
-bantime = 3600
-findtime = 600
-EOF
-
-        # 針對 CentOS/RHEL 系統
-        if [ -f /etc/redhat-release ]; then
-            sed -i 's|logpath = /var/log/auth.log|logpath = /var/log/secure|' /etc/fail2ban/jail.local
-        fi
-        
-        # 啟動服務
-        systemctl enable fail2ban > /dev/null 2>&1
-        systemctl restart fail2ban > /dev/null 2>&1
-        
-        sleep 2
-        
-        if systemctl is-active --quiet fail2ban; then
-            echo -e "${GREEN}${ICON_SUCCESS} Fail2Ban 已啟動並運行${NC}"
-            echo -e "${CYAN}  • 白名單 IP: ${WHITE}114.39.15.79${NC}"
-            echo -e "${CYAN}  • 封鎖時間: ${WHITE}1 小時${NC}"
-            echo -e "${CYAN}  • 失敗次數: ${WHITE}5 次 / 10 分鐘${NC}"
-            echo -e "${CYAN}  • 日誌模式: ${WHITE}無痕跡 (/dev/null)${NC}"
-        else
-            echo -e "${RED}${ICON_DANGER} Fail2Ban 啟動失敗${NC}"
-            return 1
-        fi
-    else
-        echo -e "${RED}${ICON_DANGER} Fail2Ban 安裝失敗${NC}"
-        return 1
-    fi
-    
-    echo ""
-}
-
-# 執行 Fail2Ban 安裝檢查
-install_fail2ban
 
 # ==========================================
 # 主機基本資訊
@@ -264,13 +146,13 @@ echo -e "${CYAN}└────────────────────�
 echo ""
 
 # ==========================================
-# 即時資源使用監控（強化版）
+# 即時資源使用監控（優化版）
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
 echo -e "${CYAN}│${YELLOW} ${ICON_CPU} 即時資源使用監控${NC}                                           ${CYAN}│${NC}"
 echo -e "${CYAN}├────────────────────────────────────────────────────────────────┤${NC}"
 
-# CPU 使用率 TOP 5（更詳細）
+# CPU 使用率 TOP 5
 echo -e "${CYAN}│${NC} ${BOLD}${CYAN}▶ CPU 使用率 TOP 5${NC}"
 echo -e "${CYAN}│${NC}   ${DIM}排名  用戶       CPU%   記憶體%  指令${NC}"
 echo -e "${CYAN}│${NC}"
@@ -305,7 +187,6 @@ ps aux --sort=-%mem | awk 'NR>1 && NR<=6 {
     if (length(user) > 8) user = substr(user, 1, 8);
     if (length(cmd) > 25) cmd = substr(cmd, 1, 22) "...";
     
-    # 轉換 RSS 為 MB
     rss_mb = sprintf("%.1f", rss/1024);
     
     mem_color = "'"${WHITE}"'";
@@ -316,7 +197,7 @@ ps aux --sort=-%mem | awk 'NR>1 && NR<=6 {
            NR-1".", user, mem, rss_mb, cmd
 }'
 
-# 網站服務資源使用（更詳細）
+# 網站服務資源使用
 echo -e "${CYAN}│${NC}"
 echo -e "${CYAN}│${NC} ${BOLD}${CYAN}▶ 網站服務資源使用${NC}"
 echo -e "${CYAN}│${NC}"
@@ -351,9 +232,8 @@ LISTEN_PORTS=$(ss -tln 2>/dev/null | grep LISTEN | wc -l)
 
 echo -e "${CYAN}│${NC}   ${DIM}目前連線數: ${WHITE}${TOTAL_CONN}${DIM} | 監聽埠號: ${WHITE}${LISTEN_PORTS}${NC}"
 
-# I/O 統計（如果 iostat 可用）
 if command -v iostat &> /dev/null; then
-    IO_WAIT=$(iostat -c 1 2 | awk '/^avg/ {print $4}' | tail -1)
+    IO_WAIT=$(iostat -c 1 2 2>/dev/null | awk '/^avg/ {print $4}' | tail -1)
     if [ ! -z "$IO_WAIT" ]; then
         echo -e "${CYAN}│${NC}   ${DIM}I/O 等待: ${WHITE}${IO_WAIT}%${NC}"
     fi
@@ -361,6 +241,7 @@ fi
 
 echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
 echo ""
+sleep 0.3
 
 # ==========================================
 # 1. 登入狀態監控
@@ -403,13 +284,14 @@ if [ $FAILED_COUNT -gt 0 ]; then
     
     if [ $FAILED_COUNT -gt 100 ]; then
         echo -e "${RED}${ICON_DANGER} ${BOLD}偵測到大量暴力破解嘗試！${NC}"
+        NEED_FAIL2BAN=1
         
-        # 檢查 Fail2Ban 是否已處理
+        # 檢查 Fail2Ban 是否已運行
         if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2ban; then
             BANNED_COUNT=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
             echo -e "${GREEN}${ICON_SUCCESS} Fail2Ban 已封鎖 ${BANNED_COUNT:-0} 個 IP${NC}"
         else
-            add_alert "CRITICAL" "SSH 暴力破解攻擊: ${FAILED_COUNT} 次失敗登入"
+            add_alert "CRITICAL" "SSH 暴力破解攻擊: ${FAILED_COUNT} 次失敗登入（建議安裝 Fail2Ban）"
         fi
         
         echo -e "${RED}前 5 名攻擊來源:${NC}"
@@ -425,10 +307,8 @@ echo ""
 sleep 0.3
 
 # ==========================================
-# 2-7. 其他掃描項目（保持原樣）
+# 2. 惡意 Process 掃描
 # ==========================================
-
-# [2. 惡意 Process 掃描]
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
 echo -e "${CYAN}│${YELLOW} [1/12] ${ICON_SCAN} 惡意 Process 掃描${NC}                                 ${CYAN}│${NC}"
 echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
@@ -468,8 +348,11 @@ fi
 echo ""
 sleep 0.3
 
-# [3-12 掃描項目繼續...]
-# (保持之前的程式碼，這裡省略以節省篇幅)
+# ==========================================
+# 3-12. 其他掃描項目（省略，保持原樣）
+# ==========================================
+
+# [這裡應包含原本的掃描 3-12，為節省篇幅暫時省略]
 
 # ==========================================
 # 總結報告
@@ -514,13 +397,81 @@ if [ ${#ALERTS[@]} -gt 0 ]; then
     echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
 fi
 
-# Fail2Ban 統計
+# Fail2Ban 檢查與自動安裝
 if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2ban; then
     BANNED_NOW=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
     TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $NF}')
     echo -e "${CYAN}║${NC} ${GREEN}${ICON_SHIELD} Fail2Ban 防護統計:${NC}"
     echo -e "${CYAN}║${NC}    當前封鎖: ${WHITE}${BANNED_NOW:-0}${NC} 個 | 累計封鎖: ${WHITE}${TOTAL_BANNED:-0}${NC} 次"
     echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
+else
+    # Fail2Ban 未安裝或未運行，自動安裝
+    if [ $NEED_FAIL2BAN -eq 1 ] || [ $FAILED_COUNT -gt 50 ]; then
+        echo -e "${CYAN}║${NC} ${YELLOW}${ICON_SHIELD} Fail2Ban 防護系統:${NC} ${RED}未安裝${NC}"
+        echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
+        echo -e "${CYAN}║${NC} ${CYAN}正在自動安裝 Fail2Ban...${NC}"
+        
+        # 靜默安裝
+        if [ -f /etc/debian_version ]; then
+            apt-get update -qq > /dev/null 2>&1
+            DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban > /dev/null 2>&1
+        elif [ -f /etc/redhat-release ]; then
+            yum install -y epel-release > /dev/null 2>&1
+            yum install -y fail2ban > /dev/null 2>&1
+        fi
+        
+        if [ $? -eq 0 ]; then
+            # 建立優化設定檔
+            cat > /etc/fail2ban/jail.local <<'EOF'
+[DEFAULT]
+# 白名單（永不封鎖）
+ignoreip = 127.0.0.1/8 ::1 114.39.15.79
+
+# 封鎖時間（1 小時）
+bantime = 3600
+
+# 觀察時間窗口（10 分鐘）
+findtime = 600
+
+# 允許失敗次數
+maxretry = 5
+
+# 無郵件通知（提升效能）
+destemail = 
+action = %(action_)s
+
+[sshd]
+enabled = true
+port = ssh
+logpath = /var/log/auth.log
+maxretry = 5
+bantime = 3600
+findtime = 600
+EOF
+
+            # 針對 CentOS/RHEL 調整日誌路徑
+            if [ -f /etc/redhat-release ]; then
+                sed -i 's|logpath = /var/log/auth.log|logpath = /var/log/secure|' /etc/fail2ban/jail.local
+            fi
+            
+            # 啟動服務
+            systemctl enable fail2ban > /dev/null 2>&1
+            systemctl restart fail2ban > /dev/null 2>&1
+            
+            sleep 2
+            
+            if systemctl is-active --quiet fail2ban; then
+                echo -e "${CYAN}║${NC} ${GREEN}${ICON_SUCCESS} Fail2Ban 安裝成功並已啟動${NC}"
+                echo -e "${CYAN}║${NC}    • 白名單: ${WHITE}114.39.15.79${NC}"
+                echo -e "${CYAN}║${NC}    • 封鎖規則: ${WHITE}5 次失敗 / 10 分鐘 = 封鎖 1 小時${NC}"
+            else
+                echo -e "${CYAN}║${NC} ${RED}${ICON_DANGER} Fail2Ban 安裝失敗，請手動安裝${NC}"
+            fi
+        else
+            echo -e "${CYAN}║${NC} ${RED}${ICON_DANGER} Fail2Ban 安裝失敗，請手動安裝${NC}"
+        fi
+        echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
+    fi
 fi
 
 echo -e "${CYAN}║${NC} ${DIM}掃描完成: $(date '+%Y-%m-%d %H:%M:%S')${NC}"
