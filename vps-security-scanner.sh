@@ -1,10 +1,10 @@
 #!/bin/bash
 
 #################################################
-# VPS 安全掃描工具 v4.4.1 - 無痕跡高效能版
+# VPS 安全掃描工具 v4.5.0 - WordPress 專用強化版
 # GitHub: https://github.com/jimmy-is-me/vps-security-scanner
-# 特色:完全無痕跡、智慧告警、自動清除、Fail2Ban 自動防護
-# 更新:優化CPU使用、加速Webshell掃描、Fail2Ban詳細資訊
+# 特色:WordPress 後台防護、亂碼檔名檢測、簡化 IP 資訊
+# 更新:強化 WP 後台安全、檔案完整性檢查、可疑檔名掃描
 #################################################
 
 # 顏色與圖示
@@ -23,7 +23,7 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="4.4.1"
+VERSION="4.5.0"
 
 # 效能優化
 renice -n 19 $$ > /dev/null 2>&1
@@ -36,7 +36,7 @@ clear
 # ==========================================
 echo -e "${CYAN}╔════════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║${BG_CYAN}${WHITE}                                                                    ${NC}${CYAN}║${NC}"
-echo -e "${CYAN}║${BG_CYAN}${WHITE}         🛡️  VPS 安全掃描工具 v${VERSION} - 無痕跡版               ${NC}${CYAN}║${NC}"
+echo -e "${CYAN}║${BG_CYAN}${WHITE}         🛡️  VPS 安全掃描工具 v${VERSION} - WP 強化版            ${NC}${CYAN}║${NC}"
 echo -e "${CYAN}║${BG_CYAN}${WHITE}                                                                    ${NC}${CYAN}║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
@@ -80,9 +80,10 @@ USED_RAM=$(free -h | awk '/^Mem:/ {print $3}')
 FREE_RAM=$(free -h | awk '/^Mem:/ {print $4}')
 RAM_PERCENT=$(free | awk '/^Mem:/ {printf "%.1f", $3/$2 * 100}')
 
-if (( $(echo "$RAM_PERCENT > 80" | bc -l 2>/dev/null || echo 0) )); then
+RAM_INT=${RAM_PERCENT%.*}
+if [ "${RAM_INT:-0}" -gt 80 ]; then
     RAM_COLOR="${RED}"
-elif (( $(echo "$RAM_PERCENT > 60" | bc -l 2>/dev/null || echo 0) )); then
+elif [ "${RAM_INT:-0}" -gt 60 ]; then
     RAM_COLOR="${YELLOW}"
 else
     RAM_COLOR="${GREEN}"
@@ -125,13 +126,13 @@ echo -e "${CYAN}└────────────────────�
 echo ""
 
 # ==========================================
-# 即時資源使用監控 (優化版 - 避免子shell造成CPU飆升)
+# 即時資源使用監控 (優化版)
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
 echo -e "${CYAN}│${YELLOW} 💻 即時資源使用監控${NC}                                           ${CYAN}│${NC}"
 echo -e "${CYAN}├────────────────────────────────────────────────────────────────┤${NC}"
 
-# CPU 使用率 TOP 5 (使用陣列避免while迴圈子shell問題)
+# CPU 使用率 TOP 5
 echo -e "${CYAN}│${NC} ${BOLD}${CYAN}▶ CPU 使用率 TOP 5${NC}"
 echo -e "${CYAN}│${NC}   ${DIM}排名  用戶       CPU%   記憶體%  指令${NC}"
 
@@ -367,10 +368,132 @@ fi
 echo ""
 
 # ==========================================
-# 3. Webshell 內容掃描 (優化版 - 移除時間限制、限制20筆、使用xargs平行處理)
+# 3. 🆕 WordPress 後台安全檢查 (新增功能)
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
-echo -e "${CYAN}│${YELLOW} [2/12] 🔍 Webshell 特徵碼掃描 (內容檢測)${NC}                    ${CYAN}│${NC}"
+echo -e "${CYAN}│${YELLOW} [2/12] 🔐 WordPress 後台安全檢查${NC}                            ${CYAN}│${NC}"
+echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
+echo ""
+
+WP_THREATS=0
+
+# 檢查 wp-admin 目錄的可疑 PHP
+echo -e "${DIM}檢查項目: wp-admin 目錄可疑檔案、異常管理員帳號${NC}"
+echo ""
+
+WP_ADMIN_SUSPICIOUS=$(find /var/www /home -type d -name "wp-admin" 2>/dev/null | while read admin_dir; do
+    # 檢查 wp-admin 內的非標準 PHP 檔案
+    find "$admin_dir" -type f -name "*.php" ! -name "admin*.php" ! -name "edit*.php" ! -name "post*.php" ! -name "user*.php" ! -name "index.php" ! -name "load*.php" 2>/dev/null
+done | wc -l)
+
+if [ $WP_ADMIN_SUSPICIOUS -gt 0 ]; then
+    echo -e "${RED}⚠ 發現 ${WP_ADMIN_SUSPICIOUS} 個可疑的 wp-admin 檔案:${NC}"
+    find /var/www /home -type d -name "wp-admin" 2>/dev/null | while read admin_dir; do
+        find "$admin_dir" -type f -name "*.php" ! -name "admin*.php" ! -name "edit*.php" ! -name "post*.php" ! -name "user*.php" ! -name "index.php" ! -name "load*.php" 2>/dev/null | head -10 | while read file; do
+            echo -e "${RED}  ├─ ${file}${NC}"
+        done
+    done
+    WP_THREATS=$((WP_THREATS + WP_ADMIN_SUSPICIOUS))
+    add_alert "CRITICAL" "WordPress 後台異常檔案: ${WP_ADMIN_SUSPICIOUS} 個"
+else
+    echo -e "${GREEN}✓ wp-admin 目錄無異常檔案${NC}"
+fi
+
+# 檢查 wp-includes 的可疑 PHP (常見木馬藏匿處)
+WP_INCLUDES_SUSPICIOUS=$(find /var/www /home -type d -name "wp-includes" 2>/dev/null | while read inc_dir; do
+    find "$inc_dir" -maxdepth 1 -type f -name "*.php" ! -name "class-*.php" ! -name "functions.php" ! -name "l10n.php" ! -name "plugin.php" ! -name "default-*.php" 2>/dev/null
+done | wc -l)
+
+if [ $WP_INCLUDES_SUSPICIOUS -gt 0 ]; then
+    echo ""
+    echo -e "${RED}⚠ 發現 ${WP_INCLUDES_SUSPICIOUS} 個可疑的 wp-includes 檔案:${NC}"
+    find /var/www /home -type d -name "wp-includes" 2>/dev/null | while read inc_dir; do
+        find "$inc_dir" -maxdepth 1 -type f -name "*.php" ! -name "class-*.php" ! -name "functions.php" ! -name "l10n.php" ! -name "plugin.php" ! -name "default-*.php" 2>/dev/null | head -10 | while read file; do
+            echo -e "${RED}  ├─ ${file}${NC}"
+        done
+    done
+    WP_THREATS=$((WP_THREATS + WP_INCLUDES_SUSPICIOUS))
+    add_alert "HIGH" "wp-includes 異常檔案: ${WP_INCLUDES_SUSPICIOUS} 個"
+else
+    echo -e "${GREEN}✓ wp-includes 目錄無異常檔案${NC}"
+fi
+
+THREATS_FOUND=$((THREATS_FOUND + WP_THREATS))
+echo ""
+
+# ==========================================
+# 4. 🆕 亂碼與常見病毒檔名掃描 (新增功能)
+# ==========================================
+echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
+echo -e "${CYAN}│${YELLOW} [3/12] 🦠 亂碼與病毒檔名掃描${NC}                               ${CYAN}│${NC}"
+echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
+echo ""
+
+echo -e "${DIM}檢查項目: 亂碼檔名、常見病毒檔名 (c99, r57, wso, b374k)${NC}"
+echo ""
+
+MALWARE_FILES=()
+MALWARE_TMPFILE=$(mktemp)
+
+# 掃描亂碼檔名 PHP (檔名長度>12且包含特殊字元組合)
+find /var/www /home -type f -name "*.php" \
+    ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" \
+    2>/dev/null | while read file; do
+    BASENAME=$(basename "$file")
+    # 檢測: 長度>12 且包含數字+字母混合且無意義
+    if [ ${#BASENAME} -gt 12 ] && [[ $BASENAME =~ [0-9]{3,}[a-z]{3,}|[a-z]{3,}[0-9]{3,} ]]; then
+        echo "$file" >> "$MALWARE_TMPFILE"
+    fi
+done
+
+# 掃描常見病毒檔名
+find /var/www /home -type f \( \
+    -iname "*c99*.php" -o \
+    -iname "*r57*.php" -o \
+    -iname "*wso*.php" -o \
+    -iname "*b374k*.php" -o \
+    -iname "*shell*.php" -o \
+    -iname "*backdoor*.php" -o \
+    -iname "*webshell*.php" -o \
+    -iname "*exploit*.php" -o \
+    -iname "*xxx*.php" -o \
+    -iname "*tmp*.php" -o \
+    -iname "*.suspected" \
+    \) ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" \
+    2>/dev/null >> "$MALWARE_TMPFILE"
+
+# 去重並限制20筆
+sort -u "$MALWARE_TMPFILE" | head -20 > "${MALWARE_TMPFILE}.uniq"
+MALWARE_COUNT=$(wc -l < "${MALWARE_TMPFILE}.uniq")
+
+if [ $MALWARE_COUNT -gt 0 ]; then
+    echo -e "${RED}⚠ ${BOLD}發現 ${MALWARE_COUNT} 個可疑檔名:${NC}"
+    echo ""
+    while IFS= read -r file; do
+        BASENAME=$(basename "$file")
+        echo -e "${RED}  ├─ ${file}${NC}"
+        echo -e "${DIM}  │  └─ 檔名: ${BASENAME}${NC}"
+    done < "${MALWARE_TMPFILE}.uniq"
+    
+    THREATS_FOUND=$((THREATS_FOUND + MALWARE_COUNT))
+    add_alert "CRITICAL" "可疑檔名: ${MALWARE_COUNT} 個 (可能為病毒)"
+    
+    echo ""
+    echo -e "${YELLOW}建議動作:${NC}"
+    echo -e "  ${DIM}1. 檢查這些檔案是否為惡意程式${NC}"
+    echo -e "  ${DIM}2. 確認後手動刪除: ${WHITE}rm -f /path/to/suspicious.php${NC}"
+else
+    echo -e "${GREEN}✓ 未發現可疑檔名${NC}"
+fi
+
+rm -f "$MALWARE_TMPFILE" "${MALWARE_TMPFILE}.uniq"
+echo ""
+
+# ==========================================
+# 5. Webshell 內容掃描 (優化版)
+# ==========================================
+echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
+echo -e "${CYAN}│${YELLOW} [4/12] 🔍 Webshell 特徵碼掃描 (內容檢測)${NC}                    ${CYAN}│${NC}"
 echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
 echo ""
 
@@ -382,7 +505,7 @@ echo ""
 WEBSHELL_COUNT=0
 WEBSHELL_TMPFILE=$(mktemp)
 
-# 使用 xargs 平行處理加速掃描 (最多顯示20筆)
+# 使用 xargs 平行處理加速掃描
 find /var/www /home -type f -name "*.php" \
     ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" \
     2>/dev/null | \
@@ -395,7 +518,7 @@ if [ $WEBSHELL_COUNT -gt 0 ]; then
     while IFS= read -r file; do
         echo -e "${RED}  ├─ ${file}${NC}"
         
-        # 顯示匹配的程式碼片段 (截取前 60 字元)
+        # 顯示匹配的程式碼片段
         SUSPICIOUS_LINE=$(grep -m1 -E "(eval\s*\(|base64_decode\s*\(.*eval|shell_exec)" "$file" 2>/dev/null | sed 's/^[[:space:]]*//' | head -c 60)
         [ ! -z "$SUSPICIOUS_LINE" ] && echo -e "${DIM}  │  └─ ${SUSPICIOUS_LINE}...${NC}"
     done < "$WEBSHELL_TMPFILE"
@@ -407,7 +530,6 @@ if [ $WEBSHELL_COUNT -gt 0 ]; then
     THREATS_FOUND=$((THREATS_FOUND + WEBSHELL_COUNT))
     add_alert "CRITICAL" "Webshell 檔案: ${WEBSHELL_COUNT} 個 (需手動確認)"
     
-    # 提示如何手動檢查
     echo ""
     echo -e "${YELLOW}建議動作:${NC}"
     echo -e "  ${DIM}1. 檢查上方列出的檔案是否為惡意程式${NC}"
@@ -421,7 +543,51 @@ rm -f "$WEBSHELL_TMPFILE"
 echo ""
 
 # ==========================================
-# 總結報告
+# 6. 🆕 WordPress 資料庫異常管理員檢查 (新增功能)
+# ==========================================
+echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
+echo -e "${CYAN}│${YELLOW} [5/12] 👤 WordPress 管理員帳號檢查${NC}                          ${CYAN}│${NC}"
+echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
+echo ""
+
+# 檢查 wp-config.php 是否存在
+WP_CONFIGS=$(find /var/www /home -maxdepth 5 -name "wp-config.php" -type f 2>/dev/null)
+
+if [ ! -z "$WP_CONFIGS" ]; then
+    ADMIN_CHECK_COUNT=0
+    
+    echo -e "${DIM}檢查 WordPress 管理員帳號 (需 wp-cli)${NC}"
+    echo ""
+    
+    if command -v wp &> /dev/null; then
+        echo "$WP_CONFIGS" | while read config; do
+            WP_DIR=$(dirname "$config")
+            SITE_URL=$(basename "$(dirname "$WP_DIR")")
+            
+            # 檢查管理員數量
+            ADMIN_COUNT=$(wp user list --role=administrator --path="$WP_DIR" --allow-root 2>/dev/null | wc -l)
+            ADMIN_COUNT=$((ADMIN_COUNT - 1)) # 減去標題行
+            
+            if [ $ADMIN_COUNT -gt 3 ]; then
+                echo -e "${YELLOW}⚠ ${SITE_URL}: ${ADMIN_COUNT} 個管理員 (偏多)${NC}"
+                wp user list --role=administrator --path="$WP_DIR" --allow-root --format=table 2>/dev/null | head -6
+                echo ""
+            else
+                echo -e "${GREEN}✓ ${SITE_URL}: ${ADMIN_COUNT} 個管理員${NC}"
+            fi
+        done
+    else
+        echo -e "${YELLOW}⚠ 未安裝 wp-cli,跳過管理員檢查${NC}"
+        echo -e "${DIM}  安裝: ${WHITE}curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar && chmod +x wp-cli.phar && mv wp-cli.phar /usr/local/bin/wp${NC}"
+    fi
+else
+    echo -e "${DIM}未偵測到 WordPress 網站${NC}"
+fi
+
+echo ""
+
+# ==========================================
+# 總結報告 (簡化 IP 資訊)
 # ==========================================
 echo -e "\n"
 echo -e "${CYAN}╔════════════════════════════════════════════════════════════════════╗${NC}"
@@ -458,7 +624,7 @@ if [ ${#ALERTS[@]} -gt 0 ]; then
     done
 fi
 
-# Fail2Ban 檢查與詳細資訊 (增加登入時間與封鎖時間)
+# Fail2Ban 簡化版 (僅顯示: 最後嘗試、封鎖時長、狀態)
 if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2ban; then
     echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC} ${GREEN}🛡️  Fail2Ban 防護統計:${NC}"
@@ -471,46 +637,16 @@ if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2b
     
     if [ "${BANNED_NOW:-0}" -gt 0 ]; then
         echo -e "${CYAN}║${NC}"
-        echo -e "${CYAN}║${NC} ${YELLOW}封鎖 IP 列表 (含登入時間與封鎖時間):${NC}"
+        echo -e "${CYAN}║${NC} ${YELLOW}封鎖 IP 列表:${NC}"
         
-        # 建立暫存檔案存放 fail2ban 資訊
-        F2B_TMPFILE=$(mktemp)
-        fail2ban-client get sshd bantime 2>/dev/null > "$F2B_TMPFILE" || echo "172800" > "$F2B_TMPFILE"
-        BANTIME=$(cat "$F2B_TMPFILE")
-        rm -f "$F2B_TMPFILE"
-        
-        # 轉換封鎖時間為可讀格式
-        if [ "$BANTIME" -eq "-1" ]; then
-            BANTIME_TEXT="永久"
-        else
-            BANTIME_HOURS=$((BANTIME / 3600))
-            BANTIME_TEXT="${BANTIME_HOURS} 小時"
-        fi
-        
-        # 取得封鎖的 IP 列表
+        # 取得封鎖的 IP 列表 (簡化版)
         fail2ban-client status sshd 2>/dev/null | grep "Banned IP list" | awk -F: '{print $2}' | tr ' ' '\n' | grep -v "^$" | while read ip; do
-            # 從 auth.log 找該 IP 最後一次嘗試登入的時間
-            LAST_ATTEMPT=$(grep "$ip" /var/log/auth.log 2>/dev/null | grep "Failed password" | tail -1 | awk '{print $1,$2,$3}')
+            # 最後嘗試時間
+            LAST_ATTEMPT=$(grep "$ip" /var/log/auth.log 2>/dev/null | grep "Failed password" | tail -1 | awk '{print $1" "$2" "$3}')
             [ -z "$LAST_ATTEMPT" ] && LAST_ATTEMPT="Unknown"
             
-            # 計算封鎖剩餘時間 (從 fail2ban 日誌)
-            BAN_START=$(fail2ban-client get sshd banip "$ip" 2>/dev/null | grep "Ban time" | awk '{print $NF}')
-            if [ ! -z "$BAN_START" ]; then
-                CURRENT_TIME=$(date +%s)
-                TIME_ELAPSED=$((CURRENT_TIME - BAN_START))
-                TIME_REMAIN=$((BANTIME - TIME_ELAPSED))
-                if [ $TIME_REMAIN -gt 0 ]; then
-                    HOURS_REMAIN=$((TIME_REMAIN / 3600))
-                    REMAIN_TEXT="剩餘 ${HOURS_REMAIN}h"
-                else
-                    REMAIN_TEXT="即將解封"
-                fi
-            else
-                REMAIN_TEXT="封鎖中"
-            fi
-            
-            echo -e "${CYAN}║${NC}    ${RED}├─ ${ip}${NC}"
-            echo -e "${CYAN}║${NC}       ${DIM}最後嘗試: ${LAST_ATTEMPT} | 封鎖時長: ${BANTIME_TEXT} | ${REMAIN_TEXT}${NC}"
+            # 簡化顯示
+            echo -e "${CYAN}║${NC}    ${RED}${ip}${NC} ${DIM}| 最後嘗試: ${LAST_ATTEMPT} | 封鎖: 48h | 狀態: 封鎖中${NC}"
         done
     fi
 else
@@ -530,22 +666,11 @@ else
         if [ $? -eq 0 ]; then
             cat > /etc/fail2ban/jail.local <<'EOF'
 [DEFAULT]
-# 白名單 IP
 ignoreip = 127.0.0.1/8 ::1 114.39.15.79
-
-# 封鎖 48 小時 (2d = 2 days)
 bantime = 2d
-
-# 檢測窗口 10 分鐘
 findtime = 10m
-
-# 最多失敗 5 次
 maxretry = 5
-
-# 郵件設定 (留空則不發送)
 destemail = 
-
-# 動作: 僅封鎖 IP
 action = %(action_)s
 
 [sshd]
@@ -567,7 +692,6 @@ EOF
                 echo -e "${CYAN}║${NC} ${GREEN}✓ Fail2Ban 安裝成功並已啟動${NC}"
                 echo -e "${CYAN}║${NC}    • 白名單: ${WHITE}114.39.15.79${NC}"
                 echo -e "${CYAN}║${NC}    • 封鎖規則: ${WHITE}5 次失敗 / 10 分鐘 = 封鎖 48 小時${NC}"
-                echo -e "${CYAN}║${NC}    ${DIM}(bantime=2d, findtime=10m, maxretry=5)${NC}"
             else
                 echo -e "${CYAN}║${NC} ${RED}⚠ Fail2Ban 安裝失敗，請手動安裝${NC}"
             fi
