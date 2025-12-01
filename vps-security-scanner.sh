@@ -1,10 +1,10 @@
 #!/bin/bash
 
 #################################################
-# VPS 安全掃描工具 v4.5.0 - WordPress 專用強化版
+# VPS 安全掃描工具 v4.5.1 - 輕量級快速版
 # GitHub: https://github.com/jimmy-is-me/vps-security-scanner
-# 特色:WordPress 後台防護、亂碼檔名檢測、簡化 IP 資訊
-# 更新:強化 WP 後台安全、檔案完整性檢查、可疑檔名掃描
+# 特色:快速掃描、中毒網站提醒、簡化檢測
+# 更新:移除WP後台檢查、優化檔名掃描、新增網站威脅統計
 #################################################
 
 # 顏色與圖示
@@ -23,7 +23,7 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="4.5.0"
+VERSION="4.5.1"
 
 # 效能優化
 renice -n 19 $$ > /dev/null 2>&1
@@ -36,7 +36,7 @@ clear
 # ==========================================
 echo -e "${CYAN}╔════════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║${BG_CYAN}${WHITE}                                                                    ${NC}${CYAN}║${NC}"
-echo -e "${CYAN}║${BG_CYAN}${WHITE}         🛡️  VPS 安全掃描工具 v${VERSION} - WP 強化版            ${NC}${CYAN}║${NC}"
+echo -e "${CYAN}║${BG_CYAN}${WHITE}         🛡️  VPS 安全掃描工具 v${VERSION} - 快速版              ${NC}${CYAN}║${NC}"
 echo -e "${CYAN}║${BG_CYAN}${WHITE}                                                                    ${NC}${CYAN}║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
@@ -46,6 +46,7 @@ THREATS_FOUND=0
 THREATS_CLEANED=0
 ALERTS=()
 NEED_FAIL2BAN=0
+declare -A SITE_THREATS  # 記錄每個網站的威脅數量
 
 add_alert() {
     local level=$1
@@ -126,7 +127,7 @@ echo -e "${CYAN}└────────────────────�
 echo ""
 
 # ==========================================
-# 即時資源使用監控 (優化版)
+# 即時資源使用監控
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
 echo -e "${CYAN}│${YELLOW} 💻 即時資源使用監控${NC}                                           ${CYAN}│${NC}"
@@ -368,132 +369,67 @@ fi
 echo ""
 
 # ==========================================
-# 3. 🆕 WordPress 後台安全檢查 (新增功能)
+# 3. 🆕 常見病毒檔名快速掃描 (優化版 - 僅掃描常見病毒名)
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
-echo -e "${CYAN}│${YELLOW} [2/12] 🔐 WordPress 後台安全檢查${NC}                            ${CYAN}│${NC}"
+echo -e "${CYAN}│${YELLOW} [2/12] 🦠 常見病毒檔名掃描${NC}                                   ${CYAN}│${NC}"
 echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
 echo ""
 
-WP_THREATS=0
-
-# 檢查 wp-admin 目錄的可疑 PHP
-echo -e "${DIM}檢查項目: wp-admin 目錄可疑檔案、異常管理員帳號${NC}"
+echo -e "${DIM}檢查項目: 常見病毒檔名 (c99, r57, wso, shell, backdoor)${NC}"
 echo ""
 
-WP_ADMIN_SUSPICIOUS=$(find /var/www /home -type d -name "wp-admin" 2>/dev/null | while read admin_dir; do
-    # 檢查 wp-admin 內的非標準 PHP 檔案
-    find "$admin_dir" -type f -name "*.php" ! -name "admin*.php" ! -name "edit*.php" ! -name "post*.php" ! -name "user*.php" ! -name "index.php" ! -name "load*.php" 2>/dev/null
-done | wc -l)
-
-if [ $WP_ADMIN_SUSPICIOUS -gt 0 ]; then
-    echo -e "${RED}⚠ 發現 ${WP_ADMIN_SUSPICIOUS} 個可疑的 wp-admin 檔案:${NC}"
-    find /var/www /home -type d -name "wp-admin" 2>/dev/null | while read admin_dir; do
-        find "$admin_dir" -type f -name "*.php" ! -name "admin*.php" ! -name "edit*.php" ! -name "post*.php" ! -name "user*.php" ! -name "index.php" ! -name "load*.php" 2>/dev/null | head -10 | while read file; do
-            echo -e "${RED}  ├─ ${file}${NC}"
-        done
-    done
-    WP_THREATS=$((WP_THREATS + WP_ADMIN_SUSPICIOUS))
-    add_alert "CRITICAL" "WordPress 後台異常檔案: ${WP_ADMIN_SUSPICIOUS} 個"
-else
-    echo -e "${GREEN}✓ wp-admin 目錄無異常檔案${NC}"
-fi
-
-# 檢查 wp-includes 的可疑 PHP (常見木馬藏匿處)
-WP_INCLUDES_SUSPICIOUS=$(find /var/www /home -type d -name "wp-includes" 2>/dev/null | while read inc_dir; do
-    find "$inc_dir" -maxdepth 1 -type f -name "*.php" ! -name "class-*.php" ! -name "functions.php" ! -name "l10n.php" ! -name "plugin.php" ! -name "default-*.php" 2>/dev/null
-done | wc -l)
-
-if [ $WP_INCLUDES_SUSPICIOUS -gt 0 ]; then
-    echo ""
-    echo -e "${RED}⚠ 發現 ${WP_INCLUDES_SUSPICIOUS} 個可疑的 wp-includes 檔案:${NC}"
-    find /var/www /home -type d -name "wp-includes" 2>/dev/null | while read inc_dir; do
-        find "$inc_dir" -maxdepth 1 -type f -name "*.php" ! -name "class-*.php" ! -name "functions.php" ! -name "l10n.php" ! -name "plugin.php" ! -name "default-*.php" 2>/dev/null | head -10 | while read file; do
-            echo -e "${RED}  ├─ ${file}${NC}"
-        done
-    done
-    WP_THREATS=$((WP_THREATS + WP_INCLUDES_SUSPICIOUS))
-    add_alert "HIGH" "wp-includes 異常檔案: ${WP_INCLUDES_SUSPICIOUS} 個"
-else
-    echo -e "${GREEN}✓ wp-includes 目錄無異常檔案${NC}"
-fi
-
-THREATS_FOUND=$((THREATS_FOUND + WP_THREATS))
-echo ""
-
-# ==========================================
-# 4. 🆕 亂碼與常見病毒檔名掃描 (新增功能)
-# ==========================================
-echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
-echo -e "${CYAN}│${YELLOW} [3/12] 🦠 亂碼與病毒檔名掃描${NC}                               ${CYAN}│${NC}"
-echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
-echo ""
-
-echo -e "${DIM}檢查項目: 亂碼檔名、常見病毒檔名 (c99, r57, wso, b374k)${NC}"
-echo ""
-
-MALWARE_FILES=()
 MALWARE_TMPFILE=$(mktemp)
 
-# 掃描亂碼檔名 PHP (檔名長度>12且包含特殊字元組合)
-find /var/www /home -type f -name "*.php" \
-    ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" \
-    2>/dev/null | while read file; do
-    BASENAME=$(basename "$file")
-    # 檢測: 長度>12 且包含數字+字母混合且無意義
-    if [ ${#BASENAME} -gt 12 ] && [[ $BASENAME =~ [0-9]{3,}[a-z]{3,}|[a-z]{3,}[0-9]{3,} ]]; then
-        echo "$file" >> "$MALWARE_TMPFILE"
-    fi
-done
-
-# 掃描常見病毒檔名
+# 僅掃描常見病毒檔名 (快速模式)
 find /var/www /home -type f \( \
     -iname "*c99*.php" -o \
     -iname "*r57*.php" -o \
     -iname "*wso*.php" -o \
-    -iname "*b374k*.php" -o \
     -iname "*shell*.php" -o \
     -iname "*backdoor*.php" -o \
     -iname "*webshell*.php" -o \
-    -iname "*exploit*.php" -o \
-    -iname "*xxx*.php" -o \
-    -iname "*tmp*.php" -o \
     -iname "*.suspected" \
-    \) ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" \
-    2>/dev/null >> "$MALWARE_TMPFILE"
+    \) ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" ! -path "*/backup/*" ! -path "*/backups/*" \
+    2>/dev/null | head -20 > "$MALWARE_TMPFILE"
 
-# 去重並限制20筆
-sort -u "$MALWARE_TMPFILE" | head -20 > "${MALWARE_TMPFILE}.uniq"
-MALWARE_COUNT=$(wc -l < "${MALWARE_TMPFILE}.uniq")
+MALWARE_COUNT=$(wc -l < "$MALWARE_TMPFILE")
 
 if [ $MALWARE_COUNT -gt 0 ]; then
     echo -e "${RED}⚠ ${BOLD}發現 ${MALWARE_COUNT} 個可疑檔名:${NC}"
     echo ""
     while IFS= read -r file; do
         BASENAME=$(basename "$file")
+        SITE_PATH=$(echo "$file" | grep -oP '/(var/www/|home/)[^/]+' | head -1)
+        
         echo -e "${RED}  ├─ ${file}${NC}"
         echo -e "${DIM}  │  └─ 檔名: ${BASENAME}${NC}"
-    done < "${MALWARE_TMPFILE}.uniq"
+        
+        # 記錄網站威脅
+        if [ ! -z "$SITE_PATH" ]; then
+            SITE_THREATS["$SITE_PATH"]=$((${SITE_THREATS["$SITE_PATH"]:-0} + 1))
+        fi
+    done < "$MALWARE_TMPFILE"
     
     THREATS_FOUND=$((THREATS_FOUND + MALWARE_COUNT))
-    add_alert "CRITICAL" "可疑檔名: ${MALWARE_COUNT} 個 (可能為病毒)"
+    add_alert "CRITICAL" "病毒檔名: ${MALWARE_COUNT} 個"
     
     echo ""
     echo -e "${YELLOW}建議動作:${NC}"
     echo -e "  ${DIM}1. 檢查這些檔案是否為惡意程式${NC}"
     echo -e "  ${DIM}2. 確認後手動刪除: ${WHITE}rm -f /path/to/suspicious.php${NC}"
 else
-    echo -e "${GREEN}✓ 未發現可疑檔名${NC}"
+    echo -e "${GREEN}✓ 未發現常見病毒檔名${NC}"
 fi
 
-rm -f "$MALWARE_TMPFILE" "${MALWARE_TMPFILE}.uniq"
+rm -f "$MALWARE_TMPFILE"
 echo ""
 
 # ==========================================
-# 5. Webshell 內容掃描 (優化版)
+# 4. Webshell 內容掃描
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
-echo -e "${CYAN}│${YELLOW} [4/12] 🔍 Webshell 特徵碼掃描 (內容檢測)${NC}                    ${CYAN}│${NC}"
+echo -e "${CYAN}│${YELLOW} [3/12] 🔍 Webshell 特徵碼掃描 (內容檢測)${NC}                    ${CYAN}│${NC}"
 echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
 echo ""
 
@@ -507,7 +443,7 @@ WEBSHELL_TMPFILE=$(mktemp)
 
 # 使用 xargs 平行處理加速掃描
 find /var/www /home -type f -name "*.php" \
-    ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" \
+    ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" ! -path "*/backup/*" ! -path "*/backups/*" \
     2>/dev/null | \
 xargs -P 4 -I {} grep -lE "(eval\s*\(|base64_decode\s*\(.*eval|shell_exec\s*\(|system\s*\(.*\\\$_|passthru\s*\(|exec\s*\(.*\\\$_GET)" {} 2>/dev/null | \
 head -20 > "$WEBSHELL_TMPFILE"
@@ -516,11 +452,18 @@ WEBSHELL_COUNT=$(wc -l < "$WEBSHELL_TMPFILE")
 
 if [ $WEBSHELL_COUNT -gt 0 ]; then
     while IFS= read -r file; do
+        SITE_PATH=$(echo "$file" | grep -oP '/(var/www/|home/)[^/]+' | head -1)
+        
         echo -e "${RED}  ├─ ${file}${NC}"
         
         # 顯示匹配的程式碼片段
         SUSPICIOUS_LINE=$(grep -m1 -E "(eval\s*\(|base64_decode\s*\(.*eval|shell_exec)" "$file" 2>/dev/null | sed 's/^[[:space:]]*//' | head -c 60)
         [ ! -z "$SUSPICIOUS_LINE" ] && echo -e "${DIM}  │  └─ ${SUSPICIOUS_LINE}...${NC}"
+        
+        # 記錄網站威脅
+        if [ ! -z "$SITE_PATH" ]; then
+            SITE_THREATS["$SITE_PATH"]=$((${SITE_THREATS["$SITE_PATH"]:-0} + 1))
+        fi
     done < "$WEBSHELL_TMPFILE"
     
     echo ""
@@ -528,7 +471,7 @@ if [ $WEBSHELL_COUNT -gt 0 ]; then
     [ $WEBSHELL_COUNT -eq 20 ] && echo -e "${DIM}  (顯示前 20 筆,可能還有更多)${NC}"
     
     THREATS_FOUND=$((THREATS_FOUND + WEBSHELL_COUNT))
-    add_alert "CRITICAL" "Webshell 檔案: ${WEBSHELL_COUNT} 個 (需手動確認)"
+    add_alert "CRITICAL" "Webshell 檔案: ${WEBSHELL_COUNT} 個"
     
     echo ""
     echo -e "${YELLOW}建議動作:${NC}"
@@ -543,51 +486,44 @@ rm -f "$WEBSHELL_TMPFILE"
 echo ""
 
 # ==========================================
-# 6. 🆕 WordPress 資料庫異常管理員檢查 (新增功能)
+# 🆕 疑似中毒網站提醒
 # ==========================================
-echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
-echo -e "${CYAN}│${YELLOW} [5/12] 👤 WordPress 管理員帳號檢查${NC}                          ${CYAN}│${NC}"
-echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
-echo ""
-
-# 檢查 wp-config.php 是否存在
-WP_CONFIGS=$(find /var/www /home -maxdepth 5 -name "wp-config.php" -type f 2>/dev/null)
-
-if [ ! -z "$WP_CONFIGS" ]; then
-    ADMIN_CHECK_COUNT=0
-    
-    echo -e "${DIM}檢查 WordPress 管理員帳號 (需 wp-cli)${NC}"
+if [ ${#SITE_THREATS[@]} -gt 0 ]; then
+    echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${CYAN}│${RED} 🚨 疑似中毒網站提醒${NC}                                          ${CYAN}│${NC}"
+    echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
     echo ""
     
-    if command -v wp &> /dev/null; then
-        echo "$WP_CONFIGS" | while read config; do
-            WP_DIR=$(dirname "$config")
-            SITE_URL=$(basename "$(dirname "$WP_DIR")")
-            
-            # 檢查管理員數量
-            ADMIN_COUNT=$(wp user list --role=administrator --path="$WP_DIR" --allow-root 2>/dev/null | wc -l)
-            ADMIN_COUNT=$((ADMIN_COUNT - 1)) # 減去標題行
-            
-            if [ $ADMIN_COUNT -gt 3 ]; then
-                echo -e "${YELLOW}⚠ ${SITE_URL}: ${ADMIN_COUNT} 個管理員 (偏多)${NC}"
-                wp user list --role=administrator --path="$WP_DIR" --allow-root --format=table 2>/dev/null | head -6
-                echo ""
-            else
-                echo -e "${GREEN}✓ ${SITE_URL}: ${ADMIN_COUNT} 個管理員${NC}"
-            fi
-        done
-    else
-        echo -e "${YELLOW}⚠ 未安裝 wp-cli,跳過管理員檢查${NC}"
-        echo -e "${DIM}  安裝: ${WHITE}curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar && chmod +x wp-cli.phar && mv wp-cli.phar /usr/local/bin/wp${NC}"
-    fi
-else
-    echo -e "${DIM}未偵測到 WordPress 網站${NC}"
+    echo -e "${RED}${BOLD}以下網站發現多個可疑檔案,建議優先檢查:${NC}"
+    echo ""
+    
+    # 按威脅數量排序顯示
+    for site in "${!SITE_THREATS[@]}"; do
+        echo "${SITE_THREATS[$site]} $site"
+    done | sort -rn | while read count site; do
+        if [ "$count" -ge 5 ]; then
+            RISK_LEVEL="${BG_RED}${WHITE} 高風險 ${NC}"
+        elif [ "$count" -ge 3 ]; then
+            RISK_LEVEL="${BG_YELLOW}${WHITE} 中風險 ${NC}"
+        else
+            RISK_LEVEL="${YELLOW}低風險${NC}"
+        fi
+        
+        echo -e "  ${RISK_LEVEL} ${WHITE}${site}${NC} - ${RED}發現 ${count} 個威脅${NC}"
+    done
+    
+    echo ""
+    echo -e "${YELLOW}建議處理步驟:${NC}"
+    echo -e "  ${DIM}1. 立即備份網站資料${NC}"
+    echo -e "  ${DIM}2. 檢查上方列出的可疑檔案${NC}"
+    echo -e "  ${DIM}3. 更新 WordPress 核心、佈景主題、外掛${NC}"
+    echo -e "  ${DIM}4. 更改所有管理員密碼${NC}"
+    echo -e "  ${DIM}5. 考慮安裝 Wordfence 或 Sucuri 防護外掛${NC}"
+    echo ""
 fi
 
-echo ""
-
 # ==========================================
-# 總結報告 (簡化 IP 資訊)
+# 總結報告
 # ==========================================
 echo -e "\n"
 echo -e "${CYAN}╔════════════════════════════════════════════════════════════════════╗${NC}"
@@ -624,7 +560,7 @@ if [ ${#ALERTS[@]} -gt 0 ]; then
     done
 fi
 
-# Fail2Ban 簡化版 (僅顯示: 最後嘗試、封鎖時長、狀態)
+# Fail2Ban 簡化版
 if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2ban; then
     echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC} ${GREEN}🛡️  Fail2Ban 防護統計:${NC}"
@@ -639,13 +575,10 @@ if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2b
         echo -e "${CYAN}║${NC}"
         echo -e "${CYAN}║${NC} ${YELLOW}封鎖 IP 列表:${NC}"
         
-        # 取得封鎖的 IP 列表 (簡化版)
         fail2ban-client status sshd 2>/dev/null | grep "Banned IP list" | awk -F: '{print $2}' | tr ' ' '\n' | grep -v "^$" | while read ip; do
-            # 最後嘗試時間
             LAST_ATTEMPT=$(grep "$ip" /var/log/auth.log 2>/dev/null | grep "Failed password" | tail -1 | awk '{print $1" "$2" "$3}')
             [ -z "$LAST_ATTEMPT" ] && LAST_ATTEMPT="Unknown"
             
-            # 簡化顯示
             echo -e "${CYAN}║${NC}    ${RED}${ip}${NC} ${DIM}| 最後嘗試: ${LAST_ATTEMPT} | 封鎖: 48h | 狀態: 封鎖中${NC}"
         done
     fi
