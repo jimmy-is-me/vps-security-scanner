@@ -1,5 +1,5 @@
 🛡️ VPS 安全掃描工具 v4.5.1
-![License: MIT](https://img.shields.io/badge/License-MIT
+![License: MIT](https://img.shields.io/badge/License-MIT)
 
 為 Linux VPS 設計的輕量級安全檢測工具,無需安裝任何第三方軟體,掃描完成可自動刪除腳本不留痕跡。
 
@@ -17,11 +17,10 @@
 🚨 中毒網站提醒 - 自動統計每個網站威脅數量,快速定位問題
 
 🚀 快速開始
-bash
+
 # 下載並執行
-wget https://raw.githubusercontent.com/jimmy-is-me/vps-security-scanner/main/vps-scan.sh
-chmod +x vps-scan.sh
-sudo ./vps-scan.sh
+curl -sL https://raw.githubusercontent.com/jimmy-is-me/vps-security-scanner/main/vps-security-scanner.sh | sudo bash
+
 🔍 檢測項目
 檢測項目	說明
 登入監控	檢查異常登入、暴力破解攻擊
@@ -30,8 +29,9 @@ sudo ./vps-scan.sh
 Webshell 特徵	內容檢測 eval(), base64_decode(), shell_exec()
 資源使用	監控 CPU/記憶體/網路異常
 Fail2Ban	自動安裝並配置防暴力破解
+
 📊 掃描結果示例
-text
+
 ╔════════════════════════════════════════════════════╗
 ║            🛡️  掃描結果總結                        ║
 ╠════════════════════════════════════════════════════╣
