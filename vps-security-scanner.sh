@@ -1,13 +1,15 @@
 #!/bin/bash
 
 #################################################
-# VPS 安全掃描工具 v4.5.2 - 輕量級快速版
+# VPS 安全掃描工具 v4.6.0 - 輕量級快速版
 # GitHub: https://github.com/jimmy-is-me/vps-security-scanner
 # 特色:快速掃描、中毒網站提醒、簡化檢測
 # 更新:
-#  - 只掃描網站根目錄 (PHP 掃毒)
-#  - Fail2Ban 規則: 5 次失敗 / 不限時間 = 封鎖 24 小時
-#  - 封鎖 IP 區塊顯示: 當前嘗試破解 IP 與嘗試次數
+#  - 支援常見網站根目錄 (含 home/fly/*/app/public)
+#  - 顯示/設定台灣時區,顯示目前系統時區
+#  - 系統負載自動判定(依 CPU 核心數)
+#  - 外連數健康度自動判定(依 CPU 核心數)
+#  - 記憶體以 GB/MB 易讀格式顯示
 #################################################
 
 # 顏色與圖示
@@ -26,10 +28,12 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="4.5.2"
+VERSION="4.6.0"
 
 # 掃描範圍: 網站根目錄 (PHP 掃描只針對這些)
-SCAN_ROOTS=(
+# 基本根: /var/www, /home
+# 常見面板/Web stack: home/*/public_html, home/*/www, home/*/app/public, home/fly/*/app/public 等
+SCAN_ROOT_BASE=(
     "/var/www"
     "/home"
 )
@@ -41,6 +45,75 @@ ionice -c3 -p $$ > /dev/null 2>&1
 clear
 
 # ==========================================
+# 工具函式
+# ==========================================
+# 將 kB 轉成易讀單位 (MB/GB)
+human_mem() {
+    local kb=$1
+    if [ -z "$kb" ] || [ "$kb" -eq 0 ] 2>/dev/null; then
+        echo "0M"
+        return
+    fi
+    local mb=$(awk "BEGIN {printf \"%.1f\", $kb/1024}")
+    local gb=$(awk "BEGIN {printf \"%.2f\", $kb/1048576}")
+    # 大於 8GB 顯示 GB, 否則顯示 MB
+    cmp=$(awk "BEGIN {print ($kb/1048576>8)?1:0}")
+    if [ "$cmp" -eq 1 ]; then
+        echo "${gb}G"
+    else
+        echo "${mb}M"
+    fi
+}
+
+add_alert() {
+    local level=$1
+    local message=$2
+    ALERTS+=("[$level] $message")
+}
+
+# 掃描用路徑: 自動找常見網站根
+build_scan_paths() {
+    local roots=()
+    # 1) 基礎目錄本身存在就加
+    for p in "${SCAN_ROOT_BASE[@]}"; do
+        [ -d "$p" ] && roots+=("$p")
+    done
+
+    # 2) /home/* 常見 web 根
+    if [ -d "/home" ]; then
+        while IFS= read -r d; do
+            # cPanel / 傳統 shared hosting
+            [ -d "$d/public_html" ]   && roots+=("$d/public_html")
+            [ -d "$d/www" ]           && roots+=("$d/www")
+            [ -d "$d/web" ]           && roots+=("$d/web")
+            # Laravel/容器式
+            [ -d "$d/app/public" ]    && roots+=("$d/app/public")
+        done < <(find /home -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+    fi
+
+    # 3) /home/fly/*/app/public 類型 (FlyWP / fly.io 類)
+    if [ -d "/home/fly" ]; then
+        while IFS= read -r d; do
+            [ -d "$d/app/public" ] && roots+=("$d/app/public")
+        done < <(find /home/fly -mindepth 1 -maxdepth 2 -type d 2>/dev/null)
+    fi
+
+    # 去重
+    printf '%s\n' "${roots[@]}" | sort -u | tr '\n' ' '
+}
+
+SCAN_PATHS="$(build_scan_paths)"
+
+# ==========================================
+# 計數器與全域
+# ==========================================
+THREATS_FOUND=0
+THREATS_CLEANED=0
+ALERTS=()
+NEED_FAIL2BAN=0
+declare -A SITE_THREATS  # 記錄每個網站的威脅數量
+
+# ==========================================
 # 標題
 # ==========================================
 echo -e "${CYAN}╔════════════════════════════════════════════════════════════════════╗${NC}"
@@ -50,32 +123,8 @@ echo -e "${CYAN}║${BG_CYAN}${WHITE}                                           
 echo -e "${CYAN}╚════════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
-# 計數器
-THREATS_FOUND=0
-THREATS_CLEANED=0
-ALERTS=()
-NEED_FAIL2BAN=0
-declare -A SITE_THREATS  # 記錄每個網站的威脅數量
-
-add_alert() {
-    local level=$1
-    local message=$2
-    ALERTS+=("[$level] $message")
-}
-
-# 將 SCAN_ROOTS 組成 find 用的 path
-build_scan_paths() {
-    local args=()
-    for p in "${SCAN_ROOTS[@]}"; do
-        [ -d "$p" ] && args+=("$p")
-    done
-    echo "${args[@]}"
-}
-
-SCAN_PATHS="$(build_scan_paths)"
-
 # ==========================================
-# 主機基本資訊
+# 主機基本資訊 + 時區 + 負載判斷
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
 echo -e "${CYAN}│${YELLOW} 🖥️  主機資訊${NC}                                                     ${CYAN}│${NC}"
@@ -88,18 +137,31 @@ KERNEL=$(uname -r)
 CPU_MODEL=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d':' -f2 | xargs)
 CPU_CORES=$(grep -c ^processor /proc/cpuinfo 2>/dev/null)
 [ -z "$CPU_MODEL" ] && CPU_MODEL="Unknown CPU"
+[ -z "$CPU_CORES" ] && CPU_CORES=1
+
+# 時區資訊 (預設顯示,不強制更改)
+SYS_TZ=$(timedatectl 2>/dev/null | grep "Time zone" | awk '{print $3}' || echo "Unknown")
+TZ_SYNC=$(timedatectl 2>/dev/null | grep "System clock synchronized" | awk '{print $4}' || echo "unknown")
 
 echo -e "${CYAN}│${NC} ${DIM}主機名稱:${NC} ${WHITE}${HOSTNAME}${NC}"
 echo -e "${CYAN}│${NC} ${DIM}作業系統:${NC} ${WHITE}${OS_INFO}${NC}"
 echo -e "${CYAN}│${NC} ${DIM}核心版本:${NC} ${WHITE}${KERNEL}${NC}"
 echo -e "${CYAN}│${NC} ${DIM}CPU 型號:${NC} ${WHITE}${CPU_MODEL}${NC}"
 echo -e "${CYAN}│${NC} ${DIM}CPU 核心:${NC} ${WHITE}${CPU_CORES} 核心${NC}"
+echo -e "${CYAN}│${NC} ${DIM}系統時區:${NC} ${WHITE}${SYS_TZ}${NC} ${DIM}(NTP 同步: ${TZ_SYNC})${NC}"
+echo -e "${CYAN}│${NC} ${DIM}建議時區:${NC} ${WHITE}Asia/Taipei${NC} ${DIM}(可執行: timedatectl set-timezone Asia/Taipei)${NC}"
 
-# 記憶體資訊
-TOTAL_RAM=$(free -h | awk '/^Mem:/ {print $2}')
-USED_RAM=$(free -h | awk '/^Mem:/ {print $3}')
-FREE_RAM=$(free -h | awk '/^Mem:/ {print $4}')
-RAM_PERCENT=$(free | awk '/^Mem:/ {printf "%.1f", $3/$2 * 100}')
+# 記憶體資訊 (MB/GB + 百分比)
+MEM_LINE=$(grep -E '^Mem:' /proc/meminfo 2>/dev/null)
+TOTAL_KB=$(echo "$MEM_LINE" | awk '{print $2}')
+USED_KB=$(awk '/MemTotal:/ {t=$2} /MemAvailable:/ {a=$2} END {if(t>0){print t-a}else{print 0}}' /proc/meminfo)
+[ -z "$USED_KB" ] && USED_KB=0
+FREE_KB=$((TOTAL_KB-USED_KB))
+RAM_PERCENT=$(awk "BEGIN {if($TOTAL_KB>0){printf \"%.1f\", $USED_KB/$TOTAL_KB*100}else{print 0}}")
+
+TOTAL_H=$(human_mem "$TOTAL_KB")
+USED_H=$(human_mem "$USED_KB")
+FREE_H=$(human_mem "$FREE_KB")
 
 RAM_INT=${RAM_PERCENT%.*}
 if [ "${RAM_INT:-0}" -gt 80 ]; then
@@ -110,11 +172,11 @@ else
     RAM_COLOR="${GREEN}"
 fi
 
-echo -e "${CYAN}│${NC} ${DIM}記憶體總量:${NC} ${WHITE}${TOTAL_RAM}${NC}"
-echo -e "${CYAN}│${NC} ${DIM}記憶體使用:${NC} ${RAM_COLOR}${USED_RAM}${NC} ${DIM}(${RAM_PERCENT}%)${NC}"
-echo -e "${CYAN}│${NC} ${DIM}記憶體可用:${NC} ${GREEN}${FREE_RAM}${NC}"
+echo -e "${CYAN}│${NC} ${DIM}記憶體總量:${NC} ${WHITE}${TOTAL_H}${NC}"
+echo -e "${CYAN}│${NC} ${DIM}記憶體使用:${NC} ${RAM_COLOR}${USED_H}${NC} ${DIM}(${RAM_PERCENT}%)${NC}"
+echo -e "${CYAN}│${NC} ${DIM}記憶體可用:${NC} ${GREEN}${FREE_H}${NC}"
 
-# 硬碟空間
+# 硬碟空間 (根分割區)
 DISK_TOTAL=$(df -h / | awk 'NR==2 {print $2}')
 DISK_USED=$(df -h / | awk 'NR==2 {print $3}')
 DISK_AVAIL=$(df -h / | awk 'NR==2 {print $4}')
@@ -132,15 +194,25 @@ echo -e "${CYAN}│${NC} ${DIM}硬碟總量:${NC} ${WHITE}${DISK_TOTAL}${NC}"
 echo -e "${CYAN}│${NC} ${DIM}硬碟使用:${NC} ${DISK_COLOR}${DISK_USED}${NC} ${DIM}(${DISK_PERCENT}%)${NC}"
 echo -e "${CYAN}│${NC} ${DIM}硬碟可用:${NC} ${GREEN}${DISK_AVAIL}${NC}"
 
-# 系統負載
+# 系統負載 + 健康判斷 (依 CPU 核心)
 LOAD_1=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{print $1}' | xargs)
 LOAD_5=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{print $2}' | xargs)
 LOAD_15=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{print $3}' | xargs)
-UPTIME=$(uptime -p 2>/dev/null || uptime | awk '{print $3,$4}')
+UPTIME_HUMAN=$(uptime -p 2>/dev/null || uptime | awk '{print $3,$4}')
 SCAN_TIME=$(date '+%Y-%m-%d %H:%M:%S')
 
-echo -e "${CYAN}│${NC} ${DIM}系統負載:${NC} ${WHITE}${LOAD_1}${NC} ${DIM}(1分) ${WHITE}${LOAD_5}${NC} ${DIM}(5分) ${WHITE}${LOAD_15}${NC} ${DIM}(15分)${NC}"
-echo -e "${CYAN}│${NC} ${DIM}運行時間:${NC} ${WHITE}${UPTIME}${NC}"
+# 負載比值 = LOAD_1 / CPU_CORES
+LOAD_RATIO=$(awk "BEGIN {if($CPU_CORES>0){printf \"%.2f\", $LOAD_1/$CPU_CORES}else{print 0}}")
+if (( $(echo "$LOAD_RATIO < 0.7" | bc -l) )); then
+    LOAD_STATUS="${GREEN}正常${NC}"
+elif (( $(echo "$LOAD_RATIO < 1.0" | bc -l) )); then
+    LOAD_STATUS="${YELLOW}偏高${NC}"
+else
+    LOAD_STATUS="${RED}過高${NC}"
+fi
+
+echo -e "${CYAN}│${NC} ${DIM}系統負載:${NC} ${WHITE}${LOAD_1}${NC} ${DIM}(1分) ${WHITE}${LOAD_5}${NC} ${DIM}(5分) ${WHITE}${LOAD_15}${NC} ${DIM}(15分) [${LOAD_STATUS}]${NC}"
+echo -e "${CYAN}│${NC} ${DIM}運行時間:${NC} ${WHITE}${UPTIME_HUMAN}${NC}"
 echo -e "${CYAN}│${NC} ${DIM}掃描時間:${NC} ${WHITE}${SCAN_TIME}${NC}"
 
 echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
@@ -162,11 +234,11 @@ RANK=0
 for line in "${CPU_LINES[@]}"; do
     RANK=$((RANK + 1))
     USER=$(echo "$line" | awk '{print $1}' | cut -c1-8)
-    CPU=$(echo "$line" | awk '{print $3}')
-    MEM=$(echo "$line" | awk '{print $4}')
+    CPU_P=$(echo "$line" | awk '{print $3}')
+    MEM_P=$(echo "$line" | awk '{print $4}')
     CMD=$(echo "$line" | awk '{print $11}' | cut -c1-25)
     
-    CPU_INT=${CPU%.*}
+    CPU_INT=${CPU_P%.*}
     if [ "${CPU_INT:-0}" -gt 50 ]; then
         CPU_COLOR="${RED}"
     elif [ "${CPU_INT:-0}" -gt 20 ]; then
@@ -176,26 +248,26 @@ for line in "${CPU_LINES[@]}"; do
     fi
     
     printf "${CYAN}│${NC}   ${DIM}%-4s ${YELLOW}%-10s ${NC}${CPU_COLOR}%6s%% ${DIM}%6s%%  ${NC}%s\n" \
-           "${RANK}." "$USER" "$CPU" "$MEM" "$CMD"
+           "${RANK}." "$USER" "$CPU_P" "$MEM_P" "$CMD"
 done
 
 # 記憶體使用 TOP 5
 echo -e "${CYAN}│${NC}"
 echo -e "${CYAN}│${NC} ${BOLD}${CYAN}▶ 記憶體使用 TOP 5${NC}"
-echo -e "${CYAN}│${NC}   ${DIM}排名  用戶       記憶體%  RSS      指令${NC}"
+echo -e "${CYAN}│${NC}   ${DIM}排名  用戶       記憶體%  RSS(MB)  指令${NC}"
 
 readarray -t MEM_LINES < <(ps aux --sort=-%mem | head -6 | tail -5)
 RANK=0
 for line in "${MEM_LINES[@]}"; do
     RANK=$((RANK + 1))
     USER=$(echo "$line" | awk '{print $1}' | cut -c1-8)
-    MEM=$(echo "$line" | awk '{print $4}')
-    RSS=$(echo "$line" | awk '{print $6}')
+    MEM_P=$(echo "$line" | awk '{print $4}')
+    RSS_KB=$(echo "$line" | awk '{print $6}')
     CMD=$(echo "$line" | awk '{print $11}' | cut -c1-25)
     
-    RSS_MB=$(awk "BEGIN {printf \"%.1f\", $RSS/1024}")
+    RSS_MB=$(awk "BEGIN {printf \"%.1f\", $RSS_KB/1024}")
     
-    MEM_INT=${MEM%.*}
+    MEM_INT=${MEM_P%.*}
     if [ "${MEM_INT:-0}" -gt 20 ]; then
         MEM_COLOR="${RED}"
     elif [ "${MEM_INT:-0}" -gt 10 ]; then
@@ -204,8 +276,8 @@ for line in "${MEM_LINES[@]}"; do
         MEM_COLOR="${WHITE}"
     fi
     
-    printf "${CYAN}│${NC}   ${DIM}%-4s ${YELLOW}%-10s ${NC}${MEM_COLOR}%7s%% ${DIM}%6sM  ${NC}%s\n" \
-           "${RANK}." "$USER" "$MEM" "$RSS_MB" "$CMD"
+    printf "${CYAN}│${NC}   ${DIM}%-4s ${YELLOW}%-10s ${NC}${MEM_COLOR}%7s%% ${DIM}%6s  ${NC}%s\n" \
+           "${RANK}." "$USER" "$MEM_P" "${RSS_MB}M" "$CMD"
 done
 
 # 網站服務資源使用
@@ -261,7 +333,7 @@ fi
 
 [ $WEB_SERVICES -eq 0 ] && echo -e "${CYAN}│${NC}   ${DIM}未偵測到網站服務運行${NC}"
 
-# 網路連線統計
+# 網路連線統計 + 健康判斷(依 CPU 核心)
 echo -e "${CYAN}│${NC}"
 echo -e "${CYAN}│${NC} ${BOLD}${CYAN}▶ 網路連線統計${NC}"
 
@@ -269,7 +341,19 @@ TOTAL_CONN=$(ss -tn state established 2>/dev/null | tail -n +2 | wc -l)
 LISTEN_PORTS=$(ss -tln 2>/dev/null | grep LISTEN | wc -l)
 HTTP_CONN=$(ss -tn state established 2>/dev/null | grep -E ":(80|443) " | wc -l)
 
-echo -e "${CYAN}│${NC}   ${DIM}總連線: ${WHITE}${TOTAL_CONN}${DIM} | 監聽埠: ${WHITE}${LISTEN_PORTS}${DIM} | HTTP(S): ${WHITE}${HTTP_CONN}${NC}"
+# 以 CPU 核心數決定閾值 (一核預設 200/800,線性放大)
+BASE_NORMAL=$((CPU_CORES * 200))
+BASE_HIGH=$((CPU_CORES * 800))
+
+if [ "$HTTP_CONN" -lt "$BASE_NORMAL" ]; then
+    HTTP_STATUS="${GREEN}正常${NC}"
+elif [ "$HTTP_CONN" -lt "$BASE_HIGH" ]; then
+    HTTP_STATUS="${YELLOW}偏高${NC}"
+else
+    HTTP_STATUS="${RED}異常偏高${NC}"
+fi
+
+echo -e "${CYAN}│${NC}   ${DIM}總連線: ${WHITE}${TOTAL_CONN}${DIM} | 監聽埠: ${WHITE}${LISTEN_PORTS}${DIM} | HTTP(S): ${WHITE}${HTTP_CONN}${DIM} (${HTTP_STATUS})${NC}"
 
 echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
 echo ""
@@ -294,7 +378,7 @@ if [ $CURRENT_USERS -gt 0 ]; then
         LOGIN_TIME=$(echo $line | awk '{print $3, $4}')
         IP=$(echo $line | awk '{print $5}' | tr -d '()')
         
-        if [[ ! $IP =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.|114\.39\.15\.79) ]] && [ ! -z "$IP" ]; then
+        if [[ ! $IP =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.|114\.39\.15\.79) ]] && [ -n "$IP" ]; then
             echo -e "${DIM}  │${NC} ${RED}⚠${NC} ${USER}${NC} @ ${TTY} | ${RED}${IP}${NC} | ${LOGIN_TIME}"
             add_alert "HIGH" "外部 IP 登入: ${USER} 從 ${IP}"
         else
@@ -358,8 +442,8 @@ if [ $TOTAL_SUSPICIOUS -gt 0 ]; then
         ps aux | awk 'length($11) == 8 && $11 ~ /^[a-z0-9]+$/' | grep -v "USER" | head -3 | while read line; do
             PROC=$(echo $line | awk '{print $11}')
             PID=$(echo $line | awk '{print $2}')
-            CPU=$(echo $line | awk '{print $3}')
-            echo -e "${RED}  │  • ${PROC} ${DIM}(PID: ${PID}, CPU: ${CPU}%)${NC}"
+            CPU_P=$(echo $line | awk '{print $3}')
+            echo -e "${RED}  │  • ${PROC} ${DIM}(PID: ${PID}, CPU: ${CPU_P}%)${NC}"
         done
     fi
     
@@ -368,8 +452,8 @@ if [ $TOTAL_SUSPICIOUS -gt 0 ]; then
         ps aux | grep -iE "xmrig|minerd|cpuminer" | grep -v grep | head -3 | while read line; do
             PROC=$(echo $line | awk '{print $11}')
             PID=$(echo $line | awk '{print $2}')
-            CPU=$(echo $line | awk '{print $3}')
-            echo -e "${RED}  │  • ${PROC} ${DIM}(PID: ${PID}, CPU: ${CPU}%)${NC}"
+            CPU_P=$(echo $line | awk '{print $3}')
+            echo -e "${RED}  │  • ${PROC} ${DIM}(PID: ${PID}, CPU: ${CPU_P}%)${NC}"
         done
         add_alert "CRITICAL" "偵測到挖礦程式: ${CRYPTO_MINERS} 個"
     fi
@@ -396,13 +480,12 @@ echo -e "${CYAN}│${YELLOW} [2/12] 🦠 常見病毒檔名掃描${NC}          
 echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
 echo ""
 
-echo -e "${DIM}檢查項目: 常見病毒檔名 (c99, r57, wso, shell, backdoor) - 僅網站根目錄${NC}"
+echo -e "${DIM}檢查項目: 常見病毒檔名 (c99, r57, wso, shell, backdoor) - 以網站根目錄為主${NC}"
 echo ""
 
 MALWARE_TMPFILE=$(mktemp)
 
 if [ -n "$SCAN_PATHS" ]; then
-    # 僅掃描網站根目錄樹狀 (不掃全系統)
     find $SCAN_PATHS -type f \( \
         -iname "*c99*.php" -o \
         -iname "*r57*.php" -o \
@@ -422,13 +505,12 @@ if [ $MALWARE_COUNT -gt 0 ]; then
     echo ""
     while IFS= read -r file; do
         BASENAME=$(basename "$file")
-        SITE_PATH=$(echo "$file" | grep -oP '/(var/www/|home/)[^/]+' | head -1)
+        SITE_PATH=$(echo "$file" | grep -oP '/(var/www/|home/[^/]+/(public_html|www|web|app/public)|home/fly/[^/]+/app/public)' | head -1)
         
         echo -e "${RED}  ├─ ${file}${NC}"
         echo -e "${DIM}  │  └─ 檔名: ${BASENAME}${NC}"
         
-        # 記錄網站威脅
-        if [ ! -z "$SITE_PATH" ]; then
+        if [ -n "$SITE_PATH" ]; then
             SITE_THREATS["$SITE_PATH"]=$((${SITE_THREATS["$SITE_PATH"]:-0} + 1))
         fi
     done < "$MALWARE_TMPFILE"
@@ -456,7 +538,7 @@ echo -e "${CYAN}└────────────────────�
 echo ""
 
 echo -e "${DIM}掃描範圍: 網站根目錄下的 PHP 檔案 (排除 vendor/cache/node_modules/backup)${NC}"
-echo -e "${DIM}偵測特徵: eval(), base64_decode(), shell_exec(), system()${NC}"
+echo -e "${DIM}偵測特徵: eval(base64_decode), gzinflate(base64_decode), shell_exec(), system()${NC}"
 echo -e "${DIM}顯示數量: 最多 20 筆可疑檔案${NC}"
 echo ""
 
@@ -467,7 +549,7 @@ if [ -n "$SCAN_PATHS" ]; then
     find $SCAN_PATHS -type f -name "*.php" \
         ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" ! -path "*/backup/*" ! -path "*/backups/*" \
         2>/dev/null | \
-    xargs -P 4 -I {} grep -lE "(eval\s*\(|base64_decode\s*\(.*eval|shell_exec\s*\(|system\s*\(.*\\\$_|passthru\s*\(|exec\s*\(.*\\\$_GET)" {} 2>/dev/null | \
+    xargs -P 4 -I {} grep -lE "(eval\s*\(base64_decode|gzinflate\s*\(base64_decode|shell_exec\s*\(|system\s*\(.*\\\$_|passthru\s*\(|exec\s*\(.*\\\$_GET)" {} 2>/dev/null | \
     head -20 > "$WEBSHELL_TMPFILE"
 fi
 
@@ -475,14 +557,14 @@ WEBSHELL_COUNT=$(wc -l < "$WEBSHELL_TMPFILE" 2>/dev/null || echo 0)
 
 if [ $WEBSHELL_COUNT -gt 0 ]; then
     while IFS= read -r file; do
-        SITE_PATH=$(echo "$file" | grep -oP '/(var/www/|home/)[^/]+' | head -1)
+        SITE_PATH=$(echo "$file" | grep -oP '/(var/www/|home/[^/]+/(public_html|www|web|app/public)|home/fly/[^/]+/app/public)' | head -1)
         
         echo -e "${RED}  ├─ ${file}${NC}"
         
-        SUSPICIOUS_LINE=$(grep -m1 -E "(eval\s*\(|base64_decode\s*\(.*eval|shell_exec)" "$file" 2>/dev/null | sed 's/^[[:space:]]*//' | head -c 60)
-        [ ! -z "$SUSPICIOUS_LINE" ] && echo -e "${DIM}  │  └─ ${SUSPICIOUS_LINE}...${NC}"
+        SUSPICIOUS_LINE=$(grep -m1 -E "(eval\s*\(base64_decode|gzinflate\s*\(base64_decode|shell_exec\s*\()" "$file" 2>/dev/null | sed 's/^[[:space:]]*//' | head -c 60)
+        [ -n "$SUSPICIOUS_LINE" ] && echo -e "${DIM}  │  └─ ${SUSPICIOUS_LINE}...${NC}"
         
-        if [ ! -z "$SITE_PATH" ]; then
+        if [ -n "$SITE_PATH" ]; then
             SITE_THREATS["$SITE_PATH"]=$((${SITE_THREATS["$SITE_PATH"]:-0} + 1))
         fi
     done < "$WEBSHELL_TMPFILE"
@@ -580,7 +662,7 @@ if [ ${#ALERTS[@]} -gt 0 ]; then
     done
 fi
 
-# Fail2Ban 區塊 (含封鎖規則 + 封鎖 IP + 當前嘗試破解 IP 統計)
+# Fail2Ban 區塊
 if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2ban; then
     echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC} ${GREEN}🛡️  Fail2Ban 防護統計:${NC}"
@@ -596,13 +678,18 @@ if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2b
         echo -e "${CYAN}║${NC} ${YELLOW}封鎖 IP 列表:${NC}"
         
         fail2ban-client status sshd 2>/dev/null | grep "Banned IP list" | awk -F: '{print $2}' | tr ' ' '\n' | grep -v "^$" | while read ip; do
-            LAST_ATTEMPT=$(grep "$ip" /var/log/auth.log 2>/dev/null | grep "Failed password" | tail -1 | awk '{print $1" "$2" "$3}')
+            if [ -f /var/log/auth.log ]; then
+                LAST_ATTEMPT=$(grep "$ip" /var/log/auth.log 2>/dev/null | grep "Failed password" | tail -1 | awk '{print $1" "$2" "$3}')
+            elif [ -f /var/log/secure ]; then
+                LAST_ATTEMPT=$(grep "$ip" /var/log/secure 2>/dev/null | grep "Failed password" | tail -1 | awk '{print $1" "$2" "$3}')
+            else
+                LAST_ATTEMPT=""
+            fi
             [ -z "$LAST_ATTEMPT" ] && LAST_ATTEMPT="Unknown"
             echo -e "${CYAN}║${NC}    ${RED}${ip}${NC} ${DIM}| 最後嘗試: ${LAST_ATTEMPT} | 封鎖: 24h | 狀態: 封鎖中${NC}"
         done
     fi
 
-    # 新增: 當前嘗試破解 IP 與次數 (從 auth.log / secure 抓最新失敗紀錄)
     echo -e "${CYAN}║${NC}"
     echo -e "${CYAN}║${NC} ${YELLOW}當前嘗試破解 IP (近 1,000 筆失敗登入):${NC}"
 
@@ -615,7 +702,6 @@ if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2b
     fi
 
     if [ -n "$LOG_FILE" ]; then
-        # 抓最近 1000 筆 Failed password,統計 IP 次數,顯示前 10 名
         grep "Failed password" "$LOG_FILE" 2>/dev/null | tail -1000 | \
         awk '{for(i=1;i<=NF;i++){if($i=="from"){print $(i+1)}}}' | \
         grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | \
