@@ -1,20 +1,27 @@
 🛡️ VPS 安全掃描工具 v4.5.1
-![License: MIT](https://img.shields.io/badge/License-MIT)
-Linux VPS 設計的輕量級安全檢測工具,無需安裝任何第三方軟體,掃描完成可自動刪除腳本不留痕跡。
+![License: MIT](https://img.shields.io/badge/License-MIT
+
+為 Linux VPS 設計的輕量級安全檢測工具,無需安裝任何第三方軟體,掃描完成可自動刪除腳本不留痕跡。
 
 ✨ 核心特色
 🚀 完全無痕跡 - 僅使用系統內建指令,不寫日誌、可自動刪除
+
 ⚡ 高效能設計 - 記憶體 <100MB、CPU <5%、掃描僅需 30-60 秒
+
 🛡️ 自動防護 - 整合 Fail2Ban 自動安裝,48 小時 IP 封鎖機制
+
 🎨 視覺化介面 - 彩色輸出、進度提示、風險等級標示
+
 🔍 全面檢測 - 涵蓋惡意程式、Webshell、挖礦程式、暴力破解等威脅
+
 🚨 中毒網站提醒 - 自動統計每個網站威脅數量,快速定位問題
 
 🚀 快速開始
-
+bash
 # 下載並執行
-curl -sL https://raw.githubusercontent.com/jimmy-is-me/vps-security-scanner/main/vps-security-scanner.sh | sudo bash
-
+wget https://raw.githubusercontent.com/jimmy-is-me/vps-security-scanner/main/vps-scan.sh
+chmod +x vps-scan.sh
+sudo ./vps-scan.sh
 🔍 檢測項目
 檢測項目	說明
 登入監控	檢查異常登入、暴力破解攻擊
@@ -23,8 +30,8 @@ curl -sL https://raw.githubusercontent.com/jimmy-is-me/vps-security-scanner/main
 Webshell 特徵	內容檢測 eval(), base64_decode(), shell_exec()
 資源使用	監控 CPU/記憶體/網路異常
 Fail2Ban	自動安裝並配置防暴力破解
-
 📊 掃描結果示例
+text
 ╔════════════════════════════════════════════════════╗
 ║            🛡️  掃描結果總結                        ║
 ╠════════════════════════════════════════════════════╣
@@ -37,28 +44,41 @@ Fail2Ban	自動安裝並配置防暴力破解
 ╚════════════════════════════════════════════════════╝
 🔧 適用場景
 WordPress 網站管理者快速安全檢查
+
 VPS 運維人員定期安全巡檢
+
 異常流量或資源佔用的緊急排查
+
 網站遷移前後的安全驗證
+
 多租戶主機環境例行掃描 (支援 XCloud/FlyWP/CloudPanel)
 
 ⚙️ 系統需求
 作業系統: Debian/Ubuntu/CentOS/RHEL
+
 權限: root 或 sudo
+
 記憶體: 最低 512MB
+
 硬碟: 100MB 可用空間
 
 📝 更新日誌
 v4.5.1 (2025-12-01)
 ✅ 移除 WordPress 後台檢查 (提升 30-40% 速度)
+
 ✅ 優化病毒檔名掃描 (僅掃描常見病毒名)
+
 ✅ 新增疑似中毒網站統計與風險分級
+
 ✅ 改善掃描效能,不再卡住
 
 🛡️ 安全性說明
 本工具不會上傳任何資料到外部伺服器
+
 掃描過程不會修改系統檔案 (除自動清除惡意 process)
+
 可選擇在掃描完成後自動刪除腳本本身
+
 不安裝任何第三方掃描軟體,僅使用系統內建指令
 
 📄 授權
