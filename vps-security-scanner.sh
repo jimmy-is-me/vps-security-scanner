@@ -1,10 +1,13 @@
 #!/bin/bash
 
 #################################################
-# VPS 安全掃描工具 v4.5.1 - 輕量級快速版
+# VPS 安全掃描工具 v4.5.2 - 輕量級快速版
 # GitHub: https://github.com/jimmy-is-me/vps-security-scanner
 # 特色:快速掃描、中毒網站提醒、簡化檢測
-# 更新:移除WP後台檢查、優化檔名掃描、新增網站威脅統計
+# 更新:
+#  - 只掃描網站根目錄 (PHP 掃毒)
+#  - Fail2Ban 規則: 5 次失敗 / 不限時間 = 封鎖 24 小時
+#  - 封鎖 IP 區塊顯示: 當前嘗試破解 IP 與嘗試次數
 #################################################
 
 # 顏色與圖示
@@ -23,7 +26,13 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="4.5.1"
+VERSION="4.5.2"
+
+# 掃描範圍: 網站根目錄 (PHP 掃描只針對這些)
+SCAN_ROOTS=(
+    "/var/www"
+    "/home"
+)
 
 # 效能優化
 renice -n 19 $$ > /dev/null 2>&1
@@ -53,6 +62,17 @@ add_alert() {
     local message=$2
     ALERTS+=("[$level] $message")
 }
+
+# 將 SCAN_ROOTS 組成 find 用的 path
+build_scan_paths() {
+    local args=()
+    for p in "${SCAN_ROOTS[@]}"; do
+        [ -d "$p" ] && args+=("$p")
+    done
+    echo "${args[@]}"
+}
+
+SCAN_PATHS="$(build_scan_paths)"
 
 # ==========================================
 # 主機基本資訊
@@ -369,31 +389,33 @@ fi
 echo ""
 
 # ==========================================
-# 3. 🆕 常見病毒檔名快速掃描 (優化版 - 僅掃描常見病毒名)
+# 3. 常見病毒檔名快速掃描 (網站根目錄)
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
 echo -e "${CYAN}│${YELLOW} [2/12] 🦠 常見病毒檔名掃描${NC}                                   ${CYAN}│${NC}"
 echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
 echo ""
 
-echo -e "${DIM}檢查項目: 常見病毒檔名 (c99, r57, wso, shell, backdoor)${NC}"
+echo -e "${DIM}檢查項目: 常見病毒檔名 (c99, r57, wso, shell, backdoor) - 僅網站根目錄${NC}"
 echo ""
 
 MALWARE_TMPFILE=$(mktemp)
 
-# 僅掃描常見病毒檔名 (快速模式)
-find /var/www /home -type f \( \
-    -iname "*c99*.php" -o \
-    -iname "*r57*.php" -o \
-    -iname "*wso*.php" -o \
-    -iname "*shell*.php" -o \
-    -iname "*backdoor*.php" -o \
-    -iname "*webshell*.php" -o \
-    -iname "*.suspected" \
-    \) ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" ! -path "*/backup/*" ! -path "*/backups/*" \
-    2>/dev/null | head -20 > "$MALWARE_TMPFILE"
+if [ -n "$SCAN_PATHS" ]; then
+    # 僅掃描網站根目錄樹狀 (不掃全系統)
+    find $SCAN_PATHS -type f \( \
+        -iname "*c99*.php" -o \
+        -iname "*r57*.php" -o \
+        -iname "*wso*.php" -o \
+        -iname "*shell*.php" -o \
+        -iname "*backdoor*.php" -o \
+        -iname "*webshell*.php" -o \
+        -iname "*.suspected" \
+        \) ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" ! -path "*/backup/*" ! -path "*/backups/*" \
+        2>/dev/null | head -20 > "$MALWARE_TMPFILE"
+fi
 
-MALWARE_COUNT=$(wc -l < "$MALWARE_TMPFILE")
+MALWARE_COUNT=$(wc -l < "$MALWARE_TMPFILE" 2>/dev/null || echo 0)
 
 if [ $MALWARE_COUNT -gt 0 ]; then
     echo -e "${RED}⚠ ${BOLD}發現 ${MALWARE_COUNT} 個可疑檔名:${NC}"
@@ -426,14 +448,14 @@ rm -f "$MALWARE_TMPFILE"
 echo ""
 
 # ==========================================
-# 4. Webshell 內容掃描
+# 4. Webshell 內容掃描 (網站根目錄)
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
 echo -e "${CYAN}│${YELLOW} [3/12] 🔍 Webshell 特徵碼掃描 (內容檢測)${NC}                    ${CYAN}│${NC}"
 echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
 echo ""
 
-echo -e "${DIM}掃描範圍: 所有 PHP 檔案 (排除 vendor/cache/node_modules)${NC}"
+echo -e "${DIM}掃描範圍: 網站根目錄下的 PHP 檔案 (排除 vendor/cache/node_modules/backup)${NC}"
 echo -e "${DIM}偵測特徵: eval(), base64_decode(), shell_exec(), system()${NC}"
 echo -e "${DIM}顯示數量: 最多 20 筆可疑檔案${NC}"
 echo ""
@@ -441,14 +463,15 @@ echo ""
 WEBSHELL_COUNT=0
 WEBSHELL_TMPFILE=$(mktemp)
 
-# 使用 xargs 平行處理加速掃描
-find /var/www /home -type f -name "*.php" \
-    ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" ! -path "*/backup/*" ! -path "*/backups/*" \
-    2>/dev/null | \
-xargs -P 4 -I {} grep -lE "(eval\s*\(|base64_decode\s*\(.*eval|shell_exec\s*\(|system\s*\(.*\\\$_|passthru\s*\(|exec\s*\(.*\\\$_GET)" {} 2>/dev/null | \
-head -20 > "$WEBSHELL_TMPFILE"
+if [ -n "$SCAN_PATHS" ]; then
+    find $SCAN_PATHS -type f -name "*.php" \
+        ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" ! -path "*/backup/*" ! -path "*/backups/*" \
+        2>/dev/null | \
+    xargs -P 4 -I {} grep -lE "(eval\s*\(|base64_decode\s*\(.*eval|shell_exec\s*\(|system\s*\(.*\\\$_|passthru\s*\(|exec\s*\(.*\\\$_GET)" {} 2>/dev/null | \
+    head -20 > "$WEBSHELL_TMPFILE"
+fi
 
-WEBSHELL_COUNT=$(wc -l < "$WEBSHELL_TMPFILE")
+WEBSHELL_COUNT=$(wc -l < "$WEBSHELL_TMPFILE" 2>/dev/null || echo 0)
 
 if [ $WEBSHELL_COUNT -gt 0 ]; then
     while IFS= read -r file; do
@@ -456,11 +479,9 @@ if [ $WEBSHELL_COUNT -gt 0 ]; then
         
         echo -e "${RED}  ├─ ${file}${NC}"
         
-        # 顯示匹配的程式碼片段
         SUSPICIOUS_LINE=$(grep -m1 -E "(eval\s*\(|base64_decode\s*\(.*eval|shell_exec)" "$file" 2>/dev/null | sed 's/^[[:space:]]*//' | head -c 60)
         [ ! -z "$SUSPICIOUS_LINE" ] && echo -e "${DIM}  │  └─ ${SUSPICIOUS_LINE}...${NC}"
         
-        # 記錄網站威脅
         if [ ! -z "$SITE_PATH" ]; then
             SITE_THREATS["$SITE_PATH"]=$((${SITE_THREATS["$SITE_PATH"]:-0} + 1))
         fi
@@ -486,7 +507,7 @@ rm -f "$WEBSHELL_TMPFILE"
 echo ""
 
 # ==========================================
-# 🆕 疑似中毒網站提醒
+# 疑似中毒網站提醒
 # ==========================================
 if [ ${#SITE_THREATS[@]} -gt 0 ]; then
     echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
@@ -497,7 +518,6 @@ if [ ${#SITE_THREATS[@]} -gt 0 ]; then
     echo -e "${RED}${BOLD}以下網站發現多個可疑檔案,建議優先檢查:${NC}"
     echo ""
     
-    # 按威脅數量排序顯示
     for site in "${!SITE_THREATS[@]}"; do
         echo "${SITE_THREATS[$site]} $site"
     done | sort -rn | while read count site; do
@@ -560,7 +580,7 @@ if [ ${#ALERTS[@]} -gt 0 ]; then
     done
 fi
 
-# Fail2Ban 簡化版
+# Fail2Ban 區塊 (含封鎖規則 + 封鎖 IP + 當前嘗試破解 IP 統計)
 if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2ban; then
     echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC} ${GREEN}🛡️  Fail2Ban 防護統計:${NC}"
@@ -569,7 +589,7 @@ if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2b
     TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $NF}')
     
     echo -e "${CYAN}║${NC}    當前封鎖: ${WHITE}${BANNED_NOW:-0}${NC} 個 | 累計封鎖: ${WHITE}${TOTAL_BANNED:-0}${NC} 次"
-    echo -e "${CYAN}║${NC}    ${DIM}封鎖規則: 5 次失敗 / 10 分鐘 = 封鎖 48 小時${NC}"
+    echo -e "${CYAN}║${NC}    ${DIM}封鎖規則: 5 次失敗 / 不限時間 = 封鎖 24 小時${NC}"
     
     if [ "${BANNED_NOW:-0}" -gt 0 ]; then
         echo -e "${CYAN}║${NC}"
@@ -578,9 +598,32 @@ if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2b
         fail2ban-client status sshd 2>/dev/null | grep "Banned IP list" | awk -F: '{print $2}' | tr ' ' '\n' | grep -v "^$" | while read ip; do
             LAST_ATTEMPT=$(grep "$ip" /var/log/auth.log 2>/dev/null | grep "Failed password" | tail -1 | awk '{print $1" "$2" "$3}')
             [ -z "$LAST_ATTEMPT" ] && LAST_ATTEMPT="Unknown"
-            
-            echo -e "${CYAN}║${NC}    ${RED}${ip}${NC} ${DIM}| 最後嘗試: ${LAST_ATTEMPT} | 封鎖: 48h | 狀態: 封鎖中${NC}"
+            echo -e "${CYAN}║${NC}    ${RED}${ip}${NC} ${DIM}| 最後嘗試: ${LAST_ATTEMPT} | 封鎖: 24h | 狀態: 封鎖中${NC}"
         done
+    fi
+
+    # 新增: 當前嘗試破解 IP 與次數 (從 auth.log / secure 抓最新失敗紀錄)
+    echo -e "${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC} ${YELLOW}當前嘗試破解 IP (近 1,000 筆失敗登入):${NC}"
+
+    if [ -f /var/log/auth.log ]; then
+        LOG_FILE="/var/log/auth.log"
+    elif [ -f /var/log/secure ]; then
+        LOG_FILE="/var/log/secure"
+    else
+        LOG_FILE=""
+    fi
+
+    if [ -n "$LOG_FILE" ]; then
+        # 抓最近 1000 筆 Failed password,統計 IP 次數,顯示前 10 名
+        grep "Failed password" "$LOG_FILE" 2>/dev/null | tail -1000 | \
+        awk '{for(i=1;i<=NF;i++){if($i=="from"){print $(i+1)}}}' | \
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | \
+        sort | uniq -c | sort -rn | head -10 | while read count ip; do
+            echo -e "${CYAN}║${NC}    ${WHITE}${ip}${NC} ${DIM}- 失敗嘗試 ${count} 次${NC}"
+        done
+    else
+        echo -e "${CYAN}║${NC}    ${DIM}找不到 auth.log/secure,無法顯示嘗試 IP${NC}"
     fi
 else
     if [ $NEED_FAIL2BAN -eq 1 ] || [ $FAILED_COUNT -gt 50 ]; then
@@ -600,8 +643,8 @@ else
             cat > /etc/fail2ban/jail.local <<'EOF'
 [DEFAULT]
 ignoreip = 127.0.0.1/8 ::1 114.39.15.79
-bantime = 2d
-findtime = 10m
+bantime = 24h
+findtime = 0
 maxretry = 5
 destemail = 
 action = %(action_)s
@@ -611,8 +654,8 @@ enabled = true
 port = ssh
 logpath = /var/log/auth.log
 maxretry = 5
-bantime = 2d
-findtime = 10m
+bantime = 24h
+findtime = 0
 EOF
 
             [ -f /etc/redhat-release ] && sed -i 's|logpath = /var/log/auth.log|logpath = /var/log/secure|' /etc/fail2ban/jail.local
@@ -624,7 +667,7 @@ EOF
             if systemctl is-active --quiet fail2ban; then
                 echo -e "${CYAN}║${NC} ${GREEN}✓ Fail2Ban 安裝成功並已啟動${NC}"
                 echo -e "${CYAN}║${NC}    • 白名單: ${WHITE}114.39.15.79${NC}"
-                echo -e "${CYAN}║${NC}    • 封鎖規則: ${WHITE}5 次失敗 / 10 分鐘 = 封鎖 48 小時${NC}"
+                echo -e "${CYAN}║${NC}    • 封鎖規則: ${WHITE}5 次失敗 / 不限時間 = 封鎖 24 小時${NC}"
             else
                 echo -e "${CYAN}║${NC} ${RED}⚠ Fail2Ban 安裝失敗，請手動安裝${NC}"
             fi
