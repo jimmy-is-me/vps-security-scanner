@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #################################################
-# VPS 安全掃描工具 v4.7.0 - 輕量級快速版
+# VPS 安全掃描工具 v4.7.1 - 輕量級快速版
 # GitHub: https://github.com/jimmy-is-me/vps-security-scanner
 # 特色:
 #  - 快速掃描、中毒網站提醒、簡化檢測
@@ -22,7 +22,7 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="4.7.0"
+VERSION="4.7.1"
 
 # 掃描範圍: 常見網站根目錄
 SCAN_ROOT_BASE=(
@@ -260,8 +260,13 @@ if [ "$CURRENT_USERS" -gt 0 ]; then
     done < <(who)
 fi
 
-FAILED_COUNT=$(lastb 2>/dev/null | wc -l)
+# 顯示最近 5 次登入(含 IP 資料)
 echo
+echo -e "${DIM}最近 5 次登入紀錄:${NC}"
+last -5 -F 2>/dev/null | head -5 || true
+echo
+
+FAILED_COUNT=$(lastb 2>/dev/null | wc -l)
 if [ "$FAILED_COUNT" -gt 0 ]; then
     echo -e "失敗登入嘗試: ${YELLOW}${FAILED_COUNT}${NC}"
     if [ "$FAILED_COUNT" -gt 100 ]; then
@@ -300,6 +305,7 @@ echo
 # ==========================================
 echo -e "${BOLD}${CYAN}常見病毒檔名掃描${NC}"
 echo -e "${DIM}檢查: c99 / r57 / wso / shell / backdoor / webshell / .suspected (僅網站根目錄)${NC}"
+echo -e "${DIM}忽略: 檔名包含 text / diff / engine / shell 字樣${NC}"
 
 MALWARE_TMPFILE=$(mktemp)
 
@@ -312,7 +318,9 @@ if [ -n "$SCAN_PATHS" ]; then
         -iname "*backdoor*.php" -o \
         -iname "*webshell*.php" -o \
         -iname "*.suspected" \
-        \) ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" ! -path "*/backup/*" ! -path "*/backups/*" \
+        \) \
+        ! -iname "*text*" ! -iname "*diff*" ! -iname "*engine*" ! -iname "*shell*" \
+        ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" ! -path "*/backup/*" ! -path "*/backups/*" \
         2>/dev/null | head -20 >"$MALWARE_TMPFILE"
 fi
 
@@ -344,11 +352,13 @@ echo
 echo -e "${BOLD}${CYAN}Webshell 特徵碼掃描${NC}"
 echo -e "${DIM}範圍: 網站根目錄下 PHP 檔 (排除 vendor/cache/node_modules/backup)${NC}"
 echo -e "${DIM}特徵: eval(base64_decode), gzinflate(base64_decode), shell_exec(), system()${NC}"
+echo -e "${DIM}忽略: 檔名包含 text / diff / engine / shell 字樣${NC}"
 
 WEBSHELL_TMPFILE=$(mktemp)
 
 if [ -n "$SCAN_PATHS" ]; then
     find $SCAN_PATHS -type f -name "*.php" \
+        ! -iname "*text*" ! -iname "*diff*" ! -iname "*engine*" ! -iname "*shell*" \
         ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" ! -path "*/backup/*" ! -path "*/backups/*" \
         2>/dev/null | \
     xargs -P 4 -I {} grep -lE "(eval\s*\(base64_decode|gzinflate\s*\(base64_decode|shell_exec\s*\(|system\s*\(.*\\\$_|passthru\s*\(|exec\s*\(.*\\\$_GET)" {} 2>/dev/null | \
