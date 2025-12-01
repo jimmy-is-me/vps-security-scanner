@@ -1,11 +1,17 @@
 #!/bin/bash
 
 #################################################
-# VPS 安全掃描工具 v4.6.1 - 輕量級快速版
+# VPS 安全掃描工具 v4.7.0 - 輕量級快速版
 # GitHub: https://github.com/jimmy-is-me/vps-security-scanner
+# 特色:
+#  - 快速掃描、中毒網站提醒、簡化檢測
+#  - 自動設定台灣時區 (Asia/Taipei)
+#  - 記憶體以 GB 顯示 + 百分比
+#  - 系統負載 / HTTP 外連健康判斷依 CPU 核心自動調整
+#  - Fail2Ban: 曾經累積達 maxretry 也會被封鎖 (長 findtime)
 #################################################
 
-# 顏色 (只用前景色,不要框線/底色)
+# 顏色 (簡化為前景色,不要框線/底色)
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -16,7 +22,7 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="4.6.1"
+VERSION="4.7.0"
 
 # 掃描範圍: 常見網站根目錄
 SCAN_ROOT_BASE=(
@@ -49,7 +55,7 @@ format_mem() {
     local used_kb="$2"
 
     if [ -z "$total_kb" ] || [ "$total_kb" -le 0 ] 2>/dev/null; then
-        echo "總量:0.0G 使用:0.0G(0%) 可用:0.0G"
+        echo "0.0G|0.0G|0.0G|0.0"
         return
     fi
 
@@ -80,6 +86,7 @@ build_scan_paths() {
         [ -d "$p" ] && roots+=("$p")
     done
 
+    # /home/* 常見 web 根
     if [ -d "/home" ]; then
         while IFS= read -r d; do
             [ -d "$d/public_html" ] && roots+=("$d/public_html")
@@ -89,6 +96,7 @@ build_scan_paths() {
         done < <(find /home -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
     fi
 
+    # /home/fly/*/app/public 類型
     if [ -d "/home/fly" ]; then
         while IFS= read -r d; do
             [ -d "$d/app/public" ] && roots+=("$d/app/public")
@@ -144,7 +152,7 @@ echo -e "${DIM}CPU 型號:${NC} ${WHITE}${CPU_MODEL}${NC}"
 echo -e "${DIM}CPU 核心:${NC} ${WHITE}${CPU_CORES}${NC}"
 echo -e "${DIM}系統時區:${NC} ${WHITE}${NEW_TZ}${NC} ${DIM}(NTP 同步: ${TZ_SYNC})${NC}"
 
-# 記憶體
+# 記憶體 (MemTotal/MemAvailable)
 MEM_TOTAL_KB=$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null)
 MEM_AVAIL_KB=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null)
 [ -z "$MEM_TOTAL_KB" ] && MEM_TOTAL_KB=0
@@ -189,7 +197,7 @@ echo -e "${DIM}硬碟總量:${NC} ${WHITE}${DISK_TOTAL}${NC}"
 echo -e "${DIM}硬碟使用:${NC} ${DISK_COLOR}${DISK_USED}${NC} ${DIM}(${DISK_PERCENT}%)${NC}"
 echo -e "${DIM}硬碟可用:${NC} ${GREEN}${DISK_AVAIL}${NC}"
 
-# 負載
+# 負載 (依 CPU 核心自動判斷)
 LOAD_1=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{gsub(/ /,"",$1);print $1}')
 LOAD_5=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{gsub(/ /,"",$2);print $2}')
 LOAD_15=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{gsub(/ /,"",$3);print $3}')
@@ -231,17 +239,8 @@ echo -e "${DIM}總連線:${NC} ${WHITE}${TOTAL_CONN}${NC}  ${DIM}監聽埠:${NC}
 echo
 
 # ==========================================
-# (以下流程邏輯與你 v4.6.0 相同,僅排版維持純文字/顏色)
-# 1. 登入監控
-# 2. 惡意 process
-# 3. 病毒檔名
-# 4. Webshell
-# 5. 疑似中毒網站
-# 6. Fail2Ban
-# 7. 重置失敗登入
-# ==========================================
-
 # 1. 登入狀態監控
+# ==========================================
 echo -e "${BOLD}${CYAN}系統登入監控${NC}"
 CURRENT_USERS=$(who | wc -l)
 echo -e "目前登入用戶: ${WHITE}${CURRENT_USERS}${NC}"
@@ -265,13 +264,20 @@ FAILED_COUNT=$(lastb 2>/dev/null | wc -l)
 echo
 if [ "$FAILED_COUNT" -gt 0 ]; then
     echo -e "失敗登入嘗試: ${YELLOW}${FAILED_COUNT}${NC}"
+    if [ "$FAILED_COUNT" -gt 100 ]; then
+        echo -e "${RED}偵測到大量暴力破解嘗試!${NC}"
+        NEED_FAIL2BAN=1
+    fi
 else
     echo -e "${GREEN}無失敗登入記錄${NC}"
 fi
 echo
 
+# ==========================================
 # 2. 惡意 Process 掃描
+# ==========================================
 echo -e "${BOLD}${CYAN}惡意 Process 掃描${NC}"
+
 MALICIOUS_PROCESSES=$(ps aux | awk 'length($11)==8 && $11 ~ /^[a-z0-9]+$/ && $11 !~ /lsphp|systemd|docker|mysql|redis|lighttpd|postgres|memcache/' | grep -v "USER" | wc -l)
 CRYPTO_MINERS=$(ps aux | grep -iE "xmrig|minerd|cpuminer|ccminer|cryptonight|monero|kinsing" | grep -v grep | wc -l)
 TOTAL_SUSPICIOUS=$((MALICIOUS_PROCESSES + CRYPTO_MINERS))
@@ -289,19 +295,117 @@ else
 fi
 echo
 
-# 3. 常見病毒檔名 (略: 與你原版邏輯相同,僅去框線)
-# 4. Webshell 內容掃描 (同上)
-# --- 這兩段可以直接沿用你上面 v4.6.0 的 find/grep 區塊,不用再動,為了篇幅就不重貼 ---
+# ==========================================
+# 3. 常見病毒檔名快速掃描 (網站根目錄)
+# ==========================================
+echo -e "${BOLD}${CYAN}常見病毒檔名掃描${NC}"
+echo -e "${DIM}檢查: c99 / r57 / wso / shell / backdoor / webshell / .suspected (僅網站根目錄)${NC}"
+
+MALWARE_TMPFILE=$(mktemp)
+
+if [ -n "$SCAN_PATHS" ]; then
+    find $SCAN_PATHS -type f \( \
+        -iname "*c99*.php" -o \
+        -iname "*r57*.php" -o \
+        -iname "*wso*.php" -o \
+        -iname "*shell*.php" -o \
+        -iname "*backdoor*.php" -o \
+        -iname "*webshell*.php" -o \
+        -iname "*.suspected" \
+        \) ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" ! -path "*/backup/*" ! -path "*/backups/*" \
+        2>/dev/null | head -20 >"$MALWARE_TMPFILE"
+fi
+
+MALWARE_COUNT=$(wc -l <"$MALWARE_TMPFILE" 2>/dev/null || echo 0)
+
+if [ "$MALWARE_COUNT" -gt 0 ]; then
+    echo -e "${RED}發現 ${MALWARE_COUNT} 個可疑檔名:${NC}"
+    while IFS= read -r file; do
+        BASENAME=$(basename "$file")
+        SITE_PATH=$(echo "$file" | grep -oP '/(var/www/|home/[^/]+/(public_html|www|web|app/public)|home/fly/[^/]+/app/public)' | head -1)
+        echo -e "  ${RED}${file}${NC}"
+        echo -e "    ${DIM}檔名:${NC} ${BASENAME}"
+        if [ -n "$SITE_PATH" ]; then
+            SITE_THREATS["$SITE_PATH"]=$((${SITE_THREATS["$SITE_PATH"]:-0} + 1))
+        fi
+    done <"$MALWARE_TMPFILE"
+    THREATS_FOUND=$((THREATS_FOUND + MALWARE_COUNT))
+    add_alert "CRITICAL" "病毒檔名: ${MALWARE_COUNT} 個"
+else
+    echo -e "${GREEN}未發現常見病毒檔名${NC}"
+fi
+
+rm -f "$MALWARE_TMPFILE"
+echo
+
+# ==========================================
+# 4. Webshell 內容掃描 (網站根目錄)
+# ==========================================
+echo -e "${BOLD}${CYAN}Webshell 特徵碼掃描${NC}"
+echo -e "${DIM}範圍: 網站根目錄下 PHP 檔 (排除 vendor/cache/node_modules/backup)${NC}"
+echo -e "${DIM}特徵: eval(base64_decode), gzinflate(base64_decode), shell_exec(), system()${NC}"
+
+WEBSHELL_TMPFILE=$(mktemp)
+
+if [ -n "$SCAN_PATHS" ]; then
+    find $SCAN_PATHS -type f -name "*.php" \
+        ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" ! -path "*/backup/*" ! -path "*/backups/*" \
+        2>/dev/null | \
+    xargs -P 4 -I {} grep -lE "(eval\s*\(base64_decode|gzinflate\s*\(base64_decode|shell_exec\s*\(|system\s*\(.*\\\$_|passthru\s*\(|exec\s*\(.*\\\$_GET)" {} 2>/dev/null | \
+    head -20 >"$WEBSHELL_TMPFILE"
+fi
+
+WEBSHELL_COUNT=$(wc -l <"$WEBSHELL_TMPFILE" 2>/dev/null || echo 0)
+
+if [ "$WEBSHELL_COUNT" -gt 0 ]; then
+    while IFS= read -r file; do
+        SITE_PATH=$(echo "$file" | grep -oP '/(var/www/|home/[^/]+/(public_html|www|web|app/public)|home/fly/[^/]+/app/public)' | head -1)
+        echo -e "  ${RED}${file}${NC}"
+        SUSPICIOUS_LINE=$(grep -m1 -E "(eval\s*\(base64_decode|gzinflate\s*\(base64_decode|shell_exec\s*\()" "$file" 2>/dev/null | sed 's/^[[:space:]]*//' | head -c 60)
+        [ -n "$SUSPICIOUS_LINE" ] && echo -e "    ${DIM}${SUSPICIOUS_LINE}...${NC}"
+        if [ -n "$SITE_PATH" ]; then
+            SITE_THREATS["$SITE_PATH"]=$((${SITE_THREATS["$SITE_PATH"]:-0} + 1))
+        fi
+    done <"$WEBSHELL_TMPFILE"
+
+    echo
+    echo -e "${RED}發現 ${WEBSHELL_COUNT} 個可疑 PHP 檔案${NC}"
+    THREATS_FOUND=$((THREATS_FOUND + WEBSHELL_COUNT))
+    add_alert "CRITICAL" "Webshell 檔案: ${WEBSHELL_COUNT} 個"
+else
+    echo -e "${GREEN}未發現可疑 PHP 檔案${NC}"
+fi
+
+rm -f "$WEBSHELL_TMPFILE"
+echo
+
+# ==========================================
+# 疑似中毒網站提醒
+# ==========================================
+if [ ${#SITE_THREATS[@]} -gt 0 ]; then
+    echo -e "${BOLD}${RED}疑似中毒網站提醒${NC}"
+    for site in "${!SITE_THREATS[@]}"; do
+        echo "${SITE_THREATS[$site]} $site"
+    done | sort -rn | while read -r count site; do
+        if [ "$count" -ge 5 ]; then
+            RISK="高風險"
+        elif [ "$count" -ge 3 ]; then
+            RISK="中風險"
+        else
+            RISK="低風險"
+        fi
+        echo -e "  ${YELLOW}${RISK}${NC} ${WHITE}${site}${NC} - 發現 ${RED}${count}${NC} 個威脅"
+    done
+    echo
+fi
 
 # ==========================================
 # Fail2Ban: 曾經嘗試破解也要封鎖
 # ==========================================
 echo -e "${BOLD}${CYAN}Fail2Ban 防護狀態${NC}"
 
-if command -v fail2ban-client >/dev/null 2>&1 && systemctl is-active --quiet fail2ban; then
-    echo -e "${GREEN}Fail2Ban 已安裝並運行中${NC}"
-else
-    echo -e "${YELLOW}Fail2Ban 未安裝,正在自動安裝...${NC}"
+if ! command -v fail2ban-client >/dev/null 2>&1 || ! systemctl is-active --quiet fail2ban; then
+    echo -e "${YELLOW}Fail2Ban 未安裝或未啟動,正在安裝/啟動...${NC}"
     if [ -f /etc/debian_version ]; then
         apt-get update -qq >/dev/null 2>&1
         DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban >/dev/null 2>&1
@@ -315,7 +419,7 @@ if command -v fail2ban-client >/dev/null 2>&1; then
 [DEFAULT]
 ignoreip = 127.0.0.1/8 ::1 114.39.15.79
 bantime = 24h
-findtime = 1y
+findtime = 1d
 maxretry = 3
 destemail =
 action = %(action_)s
@@ -326,7 +430,7 @@ port = ssh
 logpath = /var/log/auth.log
 maxretry = 3
 bantime = 24h
-findtime = 1y
+findtime = 1d
 EOF
 
     [ -f /etc/redhat-release ] && sed -i 's|/var/log/auth.log|/var/log/secure|' /etc/fail2ban/jail.local
@@ -334,8 +438,17 @@ EOF
     systemctl enable fail2ban >/dev/null 2>&1
     systemctl restart fail2ban >/dev/null 2>&1
 
-    echo -e "規則: ${WHITE}maxretry = 3, findtime = 1y, bantime = 24h${NC}"
-    echo -e "說明: ${DIM}一年內累積 3 次失敗登入就封鎖 24 小時,無論何時嘗試${NC}"
+    if systemctl is-active --quiet fail2ban; then
+        echo -e "${GREEN}Fail2Ban 已啟動${NC}"
+        echo -e "規則: 一天內累積 ${WHITE}3${NC} 次失敗登入,封鎖 ${WHITE}24h${NC} (曾經嘗試就算在內)"
+        BANNED_NOW=$(fail2ban-client status sshd 2>/dev/null | awk -F': ' '/Currently banned/ {print $2}')
+        TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | awk -F': ' '/Total banned/ {print $2}')
+        echo -e "目前封鎖 IP 數: ${WHITE}${BANNED_NOW:-0}${NC}, 累計封鎖: ${WHITE}${TOTAL_BANNED:-0}${NC}"
+    else
+        echo -e "${RED}Fail2Ban 啟動失敗,請手動檢查${NC}"
+    fi
+else
+    echo -e "${RED}Fail2Ban 安裝失敗,請自行安裝設定${NC}"
 fi
 echo
 
@@ -344,6 +457,7 @@ echo
 # ==========================================
 echo -e "${BOLD}${CYAN}掃描總結${NC}"
 echo -e "發現威脅: ${WHITE}${THREATS_FOUND}${NC}  已自動清除: ${GREEN}${THREATS_CLEANED}${NC}  需手動處理: ${YELLOW}$((THREATS_FOUND - THREATS_CLEANED))${NC}"
+
 if [ ${#ALERTS[@]} -gt 0 ]; then
     echo -e "${RED}重要告警:${NC}"
     for a in "${ALERTS[@]}"; do
@@ -355,11 +469,11 @@ echo
 echo -ne "${YELLOW}清理失敗登入計數 (btmp / faillock)...${NC}"
 command -v faillock >/dev/null 2>&1 && faillock --reset-all >/dev/null 2>&1
 command -v pam_tally2 >/dev/null 2>&1 && pam_tally2 --reset >/dev/null 2>&1
-: > /var/log/btmp 2>/dev/null
+: >/var/log/btmp 2>/dev/null
 echo -e " ${GREEN}完成${NC}"
 
 echo
-echo -e "${MAGENTA}掃描完成,本工具不會在系統留下程式檔或記錄${NC}"
+echo -e "${MAGENTA}掃描完成。本工具不會在系統留下程式檔或記錄${NC}"
 echo
 
 # 無痕刪除腳本 (如需啟用自行取消註解)
