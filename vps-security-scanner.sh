@@ -1,10 +1,10 @@
 #!/bin/bash
 
 #################################################
-# VPS 安全掃描工具 v4.4.0 - 無痕跡高效能版
+# VPS 安全掃描工具 v4.4.1 - 無痕跡高效能版
 # GitHub: https://github.com/jimmy-is-me/vps-security-scanner
 # 特色:完全無痕跡、智慧告警、自動清除、Fail2Ban 自動防護
-# 更新:Fail2Ban 48小時封鎖、Webshell 內容掃描
+# 更新:優化CPU使用、加速Webshell掃描、Fail2Ban詳細資訊
 #################################################
 
 # 顏色與圖示
@@ -23,7 +23,7 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="4.4.0"
+VERSION="4.4.1"
 
 # 效能優化
 renice -n 19 $$ > /dev/null 2>&1
@@ -125,33 +125,35 @@ echo -e "${CYAN}└────────────────────�
 echo ""
 
 # ==========================================
-# 即時資源使用監控
+# 即時資源使用監控 (優化版 - 避免子shell造成CPU飆升)
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
 echo -e "${CYAN}│${YELLOW} 💻 即時資源使用監控${NC}                                           ${CYAN}│${NC}"
 echo -e "${CYAN}├────────────────────────────────────────────────────────────────┤${NC}"
 
-# CPU 使用率 TOP 5
+# CPU 使用率 TOP 5 (使用陣列避免while迴圈子shell問題)
 echo -e "${CYAN}│${NC} ${BOLD}${CYAN}▶ CPU 使用率 TOP 5${NC}"
 echo -e "${CYAN}│${NC}   ${DIM}排名  用戶       CPU%   記憶體%  指令${NC}"
 
+readarray -t CPU_LINES < <(ps aux --sort=-%cpu | head -6 | tail -5)
 RANK=0
-ps aux --sort=-%cpu | head -6 | tail -5 | while IFS= read -r line; do
+for line in "${CPU_LINES[@]}"; do
     RANK=$((RANK + 1))
     USER=$(echo "$line" | awk '{print $1}' | cut -c1-8)
     CPU=$(echo "$line" | awk '{print $3}')
     MEM=$(echo "$line" | awk '{print $4}')
     CMD=$(echo "$line" | awk '{print $11}' | cut -c1-25)
     
-    if (( $(echo "$CPU > 50" | bc -l 2>/dev/null || echo 0) )); then
+    CPU_INT=${CPU%.*}
+    if [ "${CPU_INT:-0}" -gt 50 ]; then
         CPU_COLOR="${RED}"
-    elif (( $(echo "$CPU > 20" | bc -l 2>/dev/null || echo 0) )); then
+    elif [ "${CPU_INT:-0}" -gt 20 ]; then
         CPU_COLOR="${YELLOW}"
     else
         CPU_COLOR="${WHITE}"
     fi
     
-    printf "${CYAN}│${NC}   ${DIM}%-4s ${YELLOW}%-10s ${NC}${CPU_COLOR}%6.1f%% ${DIM}%6.1f%%  ${NC}%s\n" \
+    printf "${CYAN}│${NC}   ${DIM}%-4s ${YELLOW}%-10s ${NC}${CPU_COLOR}%6s%% ${DIM}%6s%%  ${NC}%s\n" \
            "${RANK}." "$USER" "$CPU" "$MEM" "$CMD"
 done
 
@@ -160,8 +162,9 @@ echo -e "${CYAN}│${NC}"
 echo -e "${CYAN}│${NC} ${BOLD}${CYAN}▶ 記憶體使用 TOP 5${NC}"
 echo -e "${CYAN}│${NC}   ${DIM}排名  用戶       記憶體%  RSS      指令${NC}"
 
+readarray -t MEM_LINES < <(ps aux --sort=-%mem | head -6 | tail -5)
 RANK=0
-ps aux --sort=-%mem | head -6 | tail -5 | while IFS= read -r line; do
+for line in "${MEM_LINES[@]}"; do
     RANK=$((RANK + 1))
     USER=$(echo "$line" | awk '{print $1}' | cut -c1-8)
     MEM=$(echo "$line" | awk '{print $4}')
@@ -170,15 +173,16 @@ ps aux --sort=-%mem | head -6 | tail -5 | while IFS= read -r line; do
     
     RSS_MB=$(awk "BEGIN {printf \"%.1f\", $RSS/1024}")
     
-    if (( $(echo "$MEM > 20" | bc -l 2>/dev/null || echo 0) )); then
+    MEM_INT=${MEM%.*}
+    if [ "${MEM_INT:-0}" -gt 20 ]; then
         MEM_COLOR="${RED}"
-    elif (( $(echo "$MEM > 10" | bc -l 2>/dev/null || echo 0) )); then
+    elif [ "${MEM_INT:-0}" -gt 10 ]; then
         MEM_COLOR="${YELLOW}"
     else
         MEM_COLOR="${WHITE}"
     fi
     
-    printf "${CYAN}│${NC}   ${DIM}%-4s ${YELLOW}%-10s ${NC}${MEM_COLOR}%7.1f%% ${DIM}%6sM  ${NC}%s\n" \
+    printf "${CYAN}│${NC}   ${DIM}%-4s ${YELLOW}%-10s ${NC}${MEM_COLOR}%7s%% ${DIM}%6sM  ${NC}%s\n" \
            "${RANK}." "$USER" "$MEM" "$RSS_MB" "$CMD"
 done
 
@@ -262,7 +266,7 @@ echo -e "${BOLD}${CYAN}▶ 目前登入用戶: ${WHITE}${CURRENT_USERS} 人${NC}
 if [ $CURRENT_USERS -gt 0 ]; then
     echo ""
     echo -e "${DIM}  ┌─────────────────────────────────────────────────────────┐${NC}"
-    who | while read line; do
+    while read line; do
         USER=$(echo $line | awk '{print $1}')
         TTY=$(echo $line | awk '{print $2}')
         LOGIN_TIME=$(echo $line | awk '{print $3, $4}')
@@ -274,7 +278,7 @@ if [ $CURRENT_USERS -gt 0 ]; then
         else
             echo -e "${DIM}  │${NC} ${GREEN}✓${NC} ${USER}${NC} @ ${TTY} | ${CYAN}${IP:-本機}${NC} | ${LOGIN_TIME}"
         fi
-    done
+    done < <(who)
     echo -e "${DIM}  └─────────────────────────────────────────────────────────┘${NC}"
 fi
 
@@ -363,43 +367,42 @@ fi
 echo ""
 
 # ==========================================
-# 3. Webshell 內容掃描 (新增輕量級掃描) [web:120][web:124]
+# 3. Webshell 內容掃描 (優化版 - 移除時間限制、限制20筆、使用xargs平行處理)
 # ==========================================
 echo -e "${CYAN}┌────────────────────────────────────────────────────────────────┐${NC}"
 echo -e "${CYAN}│${YELLOW} [2/12] 🔍 Webshell 特徵碼掃描 (內容檢測)${NC}                    ${CYAN}│${NC}"
 echo -e "${CYAN}└────────────────────────────────────────────────────────────────┘${NC}"
 echo ""
 
-echo -e "${DIM}掃描範圍: 最近 7 天修改的 PHP 檔案${NC}"
+echo -e "${DIM}掃描範圍: 所有 PHP 檔案 (排除 vendor/cache/node_modules)${NC}"
 echo -e "${DIM}偵測特徵: eval(), base64_decode(), shell_exec(), system()${NC}"
+echo -e "${DIM}顯示數量: 最多 20 筆可疑檔案${NC}"
 echo ""
 
 WEBSHELL_COUNT=0
-WEBSHELL_FILES=()
+WEBSHELL_TMPFILE=$(mktemp)
 
-# 掃描最近 7 天的 PHP 檔案 (排除 vendor, cache 目錄)
-while IFS= read -r file; do
-    # 檢查檔案內容是否包含可疑特徵
-    if grep -qiE "(eval\s*\(|base64_decode\s*\(.*eval|shell_exec\s*\(|system\s*\(.*\$_|passthru\s*\(|exec\s*\(.*\$_GET)" "$file" 2>/dev/null; then
-        WEBSHELL_COUNT=$((WEBSHELL_COUNT + 1))
-        WEBSHELL_FILES+=("$file")
-        
-        # 顯示前 5 個發現的檔案
-        if [ $WEBSHELL_COUNT -le 5 ]; then
-            echo -e "${RED}  ├─ ${file}${NC}"
-            
-            # 顯示匹配的程式碼片段 (截取前 50 字元)
-            SUSPICIOUS_LINE=$(grep -m1 -iE "(eval\s*\(|base64_decode\s*\(.*eval|shell_exec)" "$file" 2>/dev/null | head -c 60)
-            [ ! -z "$SUSPICIOUS_LINE" ] && echo -e "${DIM}  │  └─ ${SUSPICIOUS_LINE}...${NC}"
-        fi
-    fi
-done < <(find /var/www /home -type f -name "*.php" -mtime -7 \
-    ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" 2>/dev/null)
+# 使用 xargs 平行處理加速掃描 (最多顯示20筆)
+find /var/www /home -type f -name "*.php" \
+    ! -path "*/vendor/*" ! -path "*/cache/*" ! -path "*/node_modules/*" \
+    2>/dev/null | \
+xargs -P 4 -I {} grep -lE "(eval\s*\(|base64_decode\s*\(.*eval|shell_exec\s*\(|system\s*\(.*\\\$_|passthru\s*\(|exec\s*\(.*\\\$_GET)" {} 2>/dev/null | \
+head -20 > "$WEBSHELL_TMPFILE"
+
+WEBSHELL_COUNT=$(wc -l < "$WEBSHELL_TMPFILE")
 
 if [ $WEBSHELL_COUNT -gt 0 ]; then
+    while IFS= read -r file; do
+        echo -e "${RED}  ├─ ${file}${NC}"
+        
+        # 顯示匹配的程式碼片段 (截取前 60 字元)
+        SUSPICIOUS_LINE=$(grep -m1 -E "(eval\s*\(|base64_decode\s*\(.*eval|shell_exec)" "$file" 2>/dev/null | sed 's/^[[:space:]]*//' | head -c 60)
+        [ ! -z "$SUSPICIOUS_LINE" ] && echo -e "${DIM}  │  └─ ${SUSPICIOUS_LINE}...${NC}"
+    done < "$WEBSHELL_TMPFILE"
+    
     echo ""
     echo -e "${RED}⚠ ${BOLD}發現 ${WEBSHELL_COUNT} 個可疑 PHP 檔案${NC}"
-    [ $WEBSHELL_COUNT -gt 5 ] && echo -e "${DIM}  (僅顯示前 5 個,完整清單需手動檢查)${NC}"
+    [ $WEBSHELL_COUNT -eq 20 ] && echo -e "${DIM}  (顯示前 20 筆,可能還有更多)${NC}"
     
     THREATS_FOUND=$((THREATS_FOUND + WEBSHELL_COUNT))
     add_alert "CRITICAL" "Webshell 檔案: ${WEBSHELL_COUNT} 個 (需手動確認)"
@@ -414,6 +417,7 @@ else
     echo -e "${GREEN}✓ 未發現可疑 PHP 檔案${NC}"
 fi
 
+rm -f "$WEBSHELL_TMPFILE"
 echo ""
 
 # ==========================================
@@ -454,7 +458,7 @@ if [ ${#ALERTS[@]} -gt 0 ]; then
     done
 fi
 
-# Fail2Ban 檢查與顯示封鎖 IP (更新為 48 小時封鎖) [web:116][web:117]
+# Fail2Ban 檢查與詳細資訊 (增加登入時間與封鎖時間)
 if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2ban; then
     echo -e "${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC} ${GREEN}🛡️  Fail2Ban 防護統計:${NC}"
@@ -466,9 +470,47 @@ if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2b
     echo -e "${CYAN}║${NC}    ${DIM}封鎖規則: 5 次失敗 / 10 分鐘 = 封鎖 48 小時${NC}"
     
     if [ "${BANNED_NOW:-0}" -gt 0 ]; then
-        echo -e "${CYAN}║${NC} ${YELLOW}封鎖 IP 列表:${NC}"
+        echo -e "${CYAN}║${NC}"
+        echo -e "${CYAN}║${NC} ${YELLOW}封鎖 IP 列表 (含登入時間與封鎖時間):${NC}"
+        
+        # 建立暫存檔案存放 fail2ban 資訊
+        F2B_TMPFILE=$(mktemp)
+        fail2ban-client get sshd bantime 2>/dev/null > "$F2B_TMPFILE" || echo "172800" > "$F2B_TMPFILE"
+        BANTIME=$(cat "$F2B_TMPFILE")
+        rm -f "$F2B_TMPFILE"
+        
+        # 轉換封鎖時間為可讀格式
+        if [ "$BANTIME" -eq "-1" ]; then
+            BANTIME_TEXT="永久"
+        else
+            BANTIME_HOURS=$((BANTIME / 3600))
+            BANTIME_TEXT="${BANTIME_HOURS} 小時"
+        fi
+        
+        # 取得封鎖的 IP 列表
         fail2ban-client status sshd 2>/dev/null | grep "Banned IP list" | awk -F: '{print $2}' | tr ' ' '\n' | grep -v "^$" | while read ip; do
+            # 從 auth.log 找該 IP 最後一次嘗試登入的時間
+            LAST_ATTEMPT=$(grep "$ip" /var/log/auth.log 2>/dev/null | grep "Failed password" | tail -1 | awk '{print $1,$2,$3}')
+            [ -z "$LAST_ATTEMPT" ] && LAST_ATTEMPT="Unknown"
+            
+            # 計算封鎖剩餘時間 (從 fail2ban 日誌)
+            BAN_START=$(fail2ban-client get sshd banip "$ip" 2>/dev/null | grep "Ban time" | awk '{print $NF}')
+            if [ ! -z "$BAN_START" ]; then
+                CURRENT_TIME=$(date +%s)
+                TIME_ELAPSED=$((CURRENT_TIME - BAN_START))
+                TIME_REMAIN=$((BANTIME - TIME_ELAPSED))
+                if [ $TIME_REMAIN -gt 0 ]; then
+                    HOURS_REMAIN=$((TIME_REMAIN / 3600))
+                    REMAIN_TEXT="剩餘 ${HOURS_REMAIN}h"
+                else
+                    REMAIN_TEXT="即將解封"
+                fi
+            else
+                REMAIN_TEXT="封鎖中"
+            fi
+            
             echo -e "${CYAN}║${NC}    ${RED}├─ ${ip}${NC}"
+            echo -e "${CYAN}║${NC}       ${DIM}最後嘗試: ${LAST_ATTEMPT} | 封鎖時長: ${BANTIME_TEXT} | ${REMAIN_TEXT}${NC}"
         done
     fi
 else
@@ -486,7 +528,6 @@ else
         fi
         
         if [ $? -eq 0 ]; then
-            # 建立 48 小時封鎖配置 [web:116][web:122]
             cat > /etc/fail2ban/jail.local <<'EOF'
 [DEFAULT]
 # 白名單 IP
@@ -516,7 +557,6 @@ bantime = 2d
 findtime = 10m
 EOF
 
-            # CentOS/RHEL 使用不同的日誌路徑
             [ -f /etc/redhat-release ] && sed -i 's|logpath = /var/log/auth.log|logpath = /var/log/secure|' /etc/fail2ban/jail.local
             
             systemctl enable fail2ban > /dev/null 2>&1
