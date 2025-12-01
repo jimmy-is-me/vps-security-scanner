@@ -1,4 +1,4 @@
-🛡️ VPS 安全掃描工具 v4.5.1
+🛡️ VPS 安全掃描工具 
 ![License: MIT](https://img.shields.io/badge/License-MIT)
 
 為 Linux VPS 設計的輕量級安全檢測工具,無需安裝任何第三方軟體,掃描完成可自動刪除腳本不留痕跡。
