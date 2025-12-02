@@ -1,12 +1,12 @@
 #!/bin/bash
 
 #################################################
-# VPS 安全掃描工具 v4.8.0 - 優化版
+# VPS 安全掃描工具 v4.9.0 - 整合 Fail2Ban 優化版
 # GitHub: https://github.com/jimmy-is-me/vps-security-scanner
-# 修正項目:
-#  - 記憶體計算錯誤修正 (使用 MemAvailable,以 GB 顯示)
-#  - 排除 /Text/Diff/Engine 路徑
-#  - Fail2Ban 改為「一天內 3 次失敗就封鎖 24h」
+# 新增功能:
+#  - 自動檢測並更新 Fail2Ban 規則（一天內 3 次失敗 = 封鎖 24h）
+#  - 顯示每個 IP 的失敗嘗試次數
+#  - 自動封鎖高風險 IP（失敗 >50 次）
 #  - 保留所有原有功能
 #################################################
 
@@ -21,7 +21,7 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="4.8.0"
+VERSION="4.9.0"
 
 # 掃描範圍
 SCAN_ROOT_BASE=(
@@ -38,7 +38,6 @@ clear
 # ==========================================
 # 工具函式
 # ==========================================
-# KB 轉 GB (修正版)
 kb_to_gb() {
     local kb="$1"
     [ -z "$kb" ] && kb=0
@@ -51,7 +50,6 @@ add_alert() {
     ALERTS+=("[$level] $message")
 }
 
-# 建立掃描路徑
 build_scan_paths() {
     local roots=()
     for p in "${SCAN_ROOT_BASE[@]}"; do
@@ -89,7 +87,7 @@ declare -A SITE_THREATS
 # 標題
 # ==========================================
 echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════════${NC}"
-echo -e "${BOLD}${CYAN}   🛡️  VPS 安全掃描工具 v${VERSION} - 優化版${NC}"
+echo -e "${BOLD}${CYAN}   🛡️  VPS 安全掃描工具 v${VERSION}${NC}"
 echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════════${NC}"
 echo ""
 
@@ -122,7 +120,7 @@ echo -e "${DIM}系統時區:${NC} ${WHITE}${SYS_TZ}${NC} ${DIM}(NTP: ${TZ_SYNC})
 echo -e "${DIM}建議時區:${NC} ${WHITE}Asia/Taipei${NC}"
 echo ""
 
-# 記憶體資訊 (修正版 - 使用 MemAvailable)
+# 記憶體資訊
 MEM_TOTAL_KB=$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null)
 MEM_AVAIL_KB=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null)
 [ -z "$MEM_TOTAL_KB" ] && MEM_TOTAL_KB=0
@@ -340,7 +338,7 @@ if [ "$CURRENT_USERS" -gt 0 ]; then
         LOGIN_TIME=$(echo "$line" | awk '{print $3, $4}')
         IP=$(echo "$line" | awk '{print $5}' | tr -d '()')
 
-        if [[ ! $IP =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.|114\.39\.15\.79) ]] && [ -n "$IP" ]; then
+        if [[ ! $IP =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.|114\.39\.15\.) ]] && [ -n "$IP" ]; then
             echo -e "${RED}⚠${NC} ${USER}${NC} @ ${TTY} | ${RED}${IP}${NC} | ${LOGIN_TIME}"
             add_alert "HIGH" "外部 IP 登入: ${USER} 從 ${IP}"
         else
@@ -371,8 +369,8 @@ if [ "$FAILED_COUNT" -gt 0 ]; then
             add_alert "CRITICAL" "SSH 暴力破解攻擊: ${FAILED_COUNT} 次失敗登入"
         fi
 
-        echo -e "${RED}前 5 名攻擊來源:${NC}"
-        lastb 2>/dev/null | awk '{print $3}' | grep -v "^$" | sort | uniq -c | sort -rn | head -5 | while read count ip; do
+        echo -e "${RED}前 10 名攻擊來源:${NC}"
+        lastb 2>/dev/null | awk '{print $3}' | grep -v "^$" | sort | uniq -c | sort -rn | head -10 | while read count ip; do
             echo -e "  ${RED}├─${NC} ${ip} ${DIM}(${count} 次)${NC}"
         done
     fi
@@ -380,6 +378,133 @@ else
     echo -e "${GREEN}✓ 無失敗登入記錄${NC}"
 fi
 echo ""
+
+# ==========================================
+# Fail2Ban 規則檢查與更新（新增）
+# ==========================================
+if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ban; then
+    echo -e "${YELLOW}🛡️  Fail2Ban 規則檢查${NC}"
+    echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
+    
+    # 獲取當前規則
+    CURRENT_MAXRETRY=$(fail2ban-client get sshd maxretry 2>/dev/null || echo "5")
+    CURRENT_FINDTIME=$(fail2ban-client get sshd findtime 2>/dev/null || echo "600")
+    CURRENT_BANTIME=$(fail2ban-client get sshd bantime 2>/dev/null || echo "3600")
+    
+    echo -e "${BOLD}${CYAN}▶ 目前規則:${NC}"
+    echo -e "${DIM}失敗次數門檻: ${WHITE}${CURRENT_MAXRETRY}${NC} 次"
+    echo -e "${DIM}時間窗口: ${WHITE}${CURRENT_FINDTIME}${NC} 秒 ${DIM}($(awk -v t="$CURRENT_FINDTIME" 'BEGIN{if(t>=86400){printf "%.1f天", t/86400}else if(t>=3600){printf "%.1f小時", t/3600}else{printf "%.0f分鐘", t/60}}'))${NC}"
+    echo -e "${DIM}封鎖時間: ${WHITE}${CURRENT_BANTIME}${NC} 秒 ${DIM}($(awk -v t="$CURRENT_BANTIME" 'BEGIN{if(t>=86400){printf "%.1f天", t/86400}else if(t>=3600){printf "%.1f小時", t/3600}else{printf "%.0f分鐘", t/60}}'))${NC}"
+    echo ""
+    
+    # 檢查規則是否需要更新
+    if [ "$CURRENT_MAXRETRY" -ne 3 ] || [ "$CURRENT_FINDTIME" -ne 86400 ] || [ "$CURRENT_BANTIME" -ne 86400 ]; then
+        echo -e "${YELLOW}⚠ 規則不符合建議設定（一天內 3 次失敗 = 封鎖 24h）${NC}"
+        echo -ne "${CYAN}正在更新 Fail2Ban 規則...${NC}"
+        
+        # 備份舊設定
+        cp /etc/fail2ban/jail.local /etc/fail2ban/jail.local.bak 2>/dev/null
+        
+        # 獲取當前登入的 IP 加入白名單
+        CURRENT_IP=$(who am i | awk '{print $5}' | tr -d '()')
+        [ -z "$CURRENT_IP" ] && CURRENT_IP="114.39.15.79"
+        
+        # 套用新規則
+        cat >/etc/fail2ban/jail.local <<EOF
+[DEFAULT]
+ignoreip = 127.0.0.1/8 ::1 114.39.15.79 114.39.15.120 ${CURRENT_IP}
+bantime = 24h
+findtime = 1d
+maxretry = 3
+destemail = 
+action = %(action_)s
+
+[sshd]
+enabled = true
+port = ssh
+logpath = /var/log/auth.log
+maxretry = 3
+bantime = 24h
+findtime = 1d
+EOF
+        
+        [ -f /etc/redhat-release ] && sed -i 's|logpath = /var/log/auth.log|logpath = /var/log/secure|' /etc/fail2ban/jail.local
+        
+        # 重啟 Fail2Ban
+        systemctl restart fail2ban >/dev/null 2>&1
+        sleep 3
+        
+        if systemctl is-active --quiet fail2ban; then
+            echo -e " ${GREEN}✓ 完成${NC}"
+            echo -e "${GREEN}✓ 新規則已套用: 一天內 3 次失敗 = 封鎖 24 小時${NC}"
+            echo -e "${DIM}   白名單: 114.39.15.79, 114.39.15.120, ${CURRENT_IP}${NC}"
+        else
+            echo -e " ${RED}✗ 失敗${NC}"
+        fi
+    else
+        echo -e "${GREEN}✓ 規則符合建議設定${NC}"
+    fi
+    echo ""
+    
+    # 顯示 IP 失敗次數統計
+    echo -e "${BOLD}${CYAN}▶ IP 失敗嘗試統計（Top 20）:${NC}"
+    echo -e "${DIM}次數    IP 位址              狀態${NC}"
+    
+    if [ -f /var/log/auth.log ]; then
+        LOG_FILE="/var/log/auth.log"
+    elif [ -f /var/log/secure ]; then
+        LOG_FILE="/var/log/secure"
+    else
+        LOG_FILE=""
+    fi
+    
+    if [ -n "$LOG_FILE" ]; then
+        # 獲取已封鎖的 IP 列表
+        BANNED_IPS=$(fail2ban-client status sshd 2>/dev/null | grep "Banned IP list" | awk -F: '{print $2}' | tr ' ' '\n' | grep -v "^$")
+        
+        grep "Failed password" "$LOG_FILE" 2>/dev/null | \
+        awk '{for(i=1;i<=NF;i++){if($i=="from"){print $(i+1)}}}' | \
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | \
+        sort | uniq -c | sort -rn | head -20 | \
+        while read count ip; do
+            if echo "$BANNED_IPS" | grep -q "^$ip$"; then
+                STATUS="${RED}已封鎖${NC}"
+            elif [ "$count" -ge 50 ]; then
+                STATUS="${YELLOW}高風險${NC}"
+            elif [ "$count" -ge 10 ]; then
+                STATUS="${YELLOW}中風險${NC}"
+            else
+                STATUS="${GREEN}低風險${NC}"
+            fi
+            printf "${WHITE}%-7d ${CYAN}%-20s ${NC}%b\n" "$count" "$ip" "$STATUS"
+        done
+        
+        # 自動封鎖高風險 IP
+        echo ""
+        echo -ne "${YELLOW}檢查是否有高風險 IP 需要封鎖...${NC}"
+        HIGH_RISK_COUNT=0
+        grep "Failed password" "$LOG_FILE" 2>/dev/null | \
+        awk '{for(i=1;i<=NF;i++){if($i=="from"){print $(i+1)}}}' | \
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | \
+        sort | uniq -c | sort -rn | \
+        awk '$1 > 50 {print $2}' | \
+        while read ip; do
+            if ! echo "$BANNED_IPS" | grep -q "^$ip$"; then
+                fail2ban-client set sshd banip "$ip" >/dev/null 2>&1
+                HIGH_RISK_COUNT=$((HIGH_RISK_COUNT + 1))
+            fi
+        done
+        
+        if [ "$HIGH_RISK_COUNT" -gt 0 ]; then
+            echo -e " ${GREEN}✓ 已封鎖 ${HIGH_RISK_COUNT} 個高風險 IP${NC}"
+        else
+            echo -e " ${GREEN}✓ 無需封鎖${NC}"
+        fi
+    else
+        echo -e "${DIM}找不到日誌檔案${NC}"
+    fi
+    echo ""
+fi
 
 # ==========================================
 # 惡意 Process 掃描
@@ -430,7 +555,7 @@ fi
 echo ""
 
 # ==========================================
-# 病毒檔名掃描 (排除 /Text/Diff/Engine)
+# 病毒檔名掃描
 # ==========================================
 echo -e "${YELLOW}[2/4] 🦠 常見病毒檔名掃描${NC}"
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
@@ -490,7 +615,7 @@ rm -f "$MALWARE_TMPFILE"
 echo ""
 
 # ==========================================
-# Webshell 內容掃描 (排除 /Text/Diff/Engine)
+# Webshell 內容掃描
 # ==========================================
 echo -e "${YELLOW}[3/4] 🔍 Webshell 特徵碼掃描${NC}"
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
@@ -620,58 +745,19 @@ if [ ${#ALERTS[@]} -gt 0 ]; then
 fi
 
 # ==========================================
-# Fail2Ban 處理 (修正版 - 一天內 3 次失敗就封鎖 24h)
+# Fail2Ban 最終狀態
 # ==========================================
 if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ban; then
     echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
-    echo -e "${GREEN}🛡️  Fail2Ban 防護統計${NC}"
+    echo -e "${GREEN}🛡️  Fail2Ban 最終狀態${NC}"
 
     BANNED_NOW=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
     TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $NF}')
 
     echo -e "當前封鎖: ${WHITE}${BANNED_NOW:-0}${NC} 個 | 累計封鎖: ${WHITE}${TOTAL_BANNED:-0}${NC} 次"
-    echo -e "${DIM}封鎖規則: 一天內 3 次失敗 = 封鎖 24 小時${NC}"
-
-    if [ "${BANNED_NOW:-0}" -gt 0 ]; then
-        echo ""
-        echo -e "${YELLOW}封鎖 IP 列表:${NC}"
-
-        fail2ban-client status sshd 2>/dev/null | grep "Banned IP list" | awk -F: '{print $2}' | tr ' ' '\n' | grep -v "^$" | while read ip; do
-            if [ -f /var/log/auth.log ]; then
-                LAST_ATTEMPT=$(grep "$ip" /var/log/auth.log 2>/dev/null | grep "Failed password" | tail -1 | awk '{print $1" "$2" "$3}')
-            elif [ -f /var/log/secure ]; then
-                LAST_ATTEMPT=$(grep "$ip" /var/log/secure 2>/dev/null | grep "Failed password" | tail -1 | awk '{print $1" "$2" "$3}')
-            else
-                LAST_ATTEMPT=""
-            fi
-            [ -z "$LAST_ATTEMPT" ] && LAST_ATTEMPT="Unknown"
-            echo -e "${RED}${ip}${NC} ${DIM}| 最後嘗試: ${LAST_ATTEMPT} | 封鎖: 24h${NC}"
-        done
-    fi
-
-    echo ""
-    echo -e "${YELLOW}當前嘗試破解 IP (近 1,000 筆失敗登入):${NC}"
-
-    if [ -f /var/log/auth.log ]; then
-        LOG_FILE="/var/log/auth.log"
-    elif [ -f /var/log/secure ]; then
-        LOG_FILE="/var/log/secure"
-    else
-        LOG_FILE=""
-    fi
-
-    if [ -n "$LOG_FILE" ]; then
-        grep "Failed password" "$LOG_FILE" 2>/dev/null | tail -1000 | \
-        awk '{for(i=1;i<=NF;i++){if($i=="from"){print $(i+1)}}}' | \
-        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | \
-        sort | uniq -c | sort -rn | head -10 | while read count ip; do
-            echo -e "${WHITE}${ip}${NC} ${DIM}- 失敗嘗試 ${count} 次${NC}"
-        done
-    else
-        echo -e "${DIM}找不到 auth.log/secure，無法顯示嘗試 IP${NC}"
-    fi
+    echo -e "${DIM}規則: 一天內 3 次失敗 = 封鎖 24 小時${NC}"
 else
-    # 自動安裝 Fail2Ban (修正版規則)
+    # 安裝 Fail2Ban
     if [ "$NEED_FAIL2BAN" -eq 1 ] || [ "$FAILED_COUNT" -gt 50 ]; then
         echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
         echo -e "${YELLOW}🛡️  Fail2Ban 防護系統:${NC} ${RED}未安裝${NC}"
@@ -686,10 +772,12 @@ else
         fi
 
         if [ $? -eq 0 ]; then
-            # 修正版 Fail2Ban 設定: 一天內 3 次失敗就封鎖 24h
-            cat >/etc/fail2ban/jail.local <<'EOF'
+            CURRENT_IP=$(who am i | awk '{print $5}' | tr -d '()')
+            [ -z "$CURRENT_IP" ] && CURRENT_IP="114.39.15.79"
+            
+            cat >/etc/fail2ban/jail.local <<EOF
 [DEFAULT]
-ignoreip = 127.0.0.1/8 ::1 114.39.15.79
+ignoreip = 127.0.0.1/8 ::1 114.39.15.79 114.39.15.120 ${CURRENT_IP}
 bantime = 24h
 findtime = 1d
 maxretry = 3
@@ -713,8 +801,8 @@ EOF
 
             if systemctl is-active --quiet fail2ban; then
                 echo -e "${GREEN}✓ Fail2Ban 安裝成功並已啟動${NC}"
-                echo -e "   • 白名單: ${WHITE}114.39.15.79${NC}"
-                echo -e "   • 封鎖規則: ${WHITE}一天內 3 次失敗 = 封鎖 24 小時${NC}"
+                echo -e "   • 白名單: ${WHITE}114.39.15.79, 114.39.15.120, ${CURRENT_IP}${NC}"
+                echo -e "   • 規則: ${WHITE}一天內 3 次失敗 = 封鎖 24 小時${NC}"
             else
                 echo -e "${RED}⚠ Fail2Ban 安裝失敗，請手動安裝${NC}"
             fi
@@ -745,10 +833,6 @@ if command -v pam_tally2 &>/dev/null; then
 fi
 
 echo -n >/var/log/btmp 2>/dev/null
-echo -n >/var/log/wtmp.1 2>/dev/null
 
 echo -e " ${GREEN}✓ 完成${NC}"
 echo ""
-
-# 無痕跡模式 (需要時取消註解)
-# rm -f "$0"
