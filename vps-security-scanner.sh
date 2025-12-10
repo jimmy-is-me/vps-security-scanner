@@ -1,12 +1,13 @@
 #!/bin/bash
 
 #################################################
-# VPS 安全掃描工具 v4.9.0 - 整合 Fail2Ban 優化版
+# VPS 安全掃描工具 v4.9.1 - 整合 Fail2Ban 優化版
 # GitHub: https://github.com/jimmy-is-me/vps-security-scanner
 # 新增功能:
-#  - 自動檢測並更新 Fail2Ban 規則（一天內 3 次失敗 = 封鎖 24h）
+#  - 自動檢測並更新 Fail2Ban 規則(一天內 3 次失敗 = 封鎖 24h)
 #  - 顯示每個 IP 的失敗嘗試次數
-#  - 自動封鎖高風險 IP（失敗 >50 次）
+#  - 自動封鎖高風險 IP(失敗 >50 次)
+#  - 新增 FLYWP 白名單 IP
 #  - 保留所有原有功能
 #################################################
 
@@ -21,7 +22,28 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="4.9.0"
+VERSION="4.9.1"
+
+# 白名單 IP 定義
+WHITELIST_IPS=(
+    "127.0.0.1/8"
+    "::1"
+    "114.39.15.79"
+    "114.39.15.120"
+    "49.13.31.45"
+    "91.107.195.115"
+    "168.119.100.163"
+    "188.34.177.5"
+)
+
+# 白名單 IP 註解
+declare -A WHITELIST_NOTES
+WHITELIST_NOTES["114.39.15.79"]="管理員"
+WHITELIST_NOTES["114.39.15.120"]="管理員"
+WHITELIST_NOTES["49.13.31.45"]="FLYWP"
+WHITELIST_NOTES["91.107.195.115"]="FLYWP"
+WHITELIST_NOTES["168.119.100.163"]="FLYWP"
+WHITELIST_NOTES["188.34.177.5"]="FLYWP"
 
 # 掃描範圍
 SCAN_ROOT_BASE=(
@@ -338,11 +360,14 @@ if [ "$CURRENT_USERS" -gt 0 ]; then
         LOGIN_TIME=$(echo "$line" | awk '{print $3, $4}')
         IP=$(echo "$line" | awk '{print $5}' | tr -d '()')
 
-        if [[ ! $IP =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.|114\.39\.15\.) ]] && [ -n "$IP" ]; then
+        if [[ ! $IP =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|127\.|114\.39\.15\.|49\.13\.31\.45|91\.107\.195\.115|168\.119\.100\.163|188\.34\.177\.5) ]] && [ -n "$IP" ]; then
             echo -e "${RED}⚠${NC} ${USER}${NC} @ ${TTY} | ${RED}${IP}${NC} | ${LOGIN_TIME}"
             add_alert "HIGH" "外部 IP 登入: ${USER} 從 ${IP}"
         else
-            echo -e "${GREEN}✓${NC} ${USER}${NC} @ ${TTY} | ${CYAN}${IP:-本機}${NC} | ${LOGIN_TIME}"
+            NOTE=""
+            [[ $IP == "114.39.15.79" || $IP == "114.39.15.120" ]] && NOTE=" ${DIM}(管理員)${NC}"
+            [[ $IP == "49.13.31.45" || $IP == "91.107.195.115" || $IP == "168.119.100.163" || $IP == "188.34.177.5" ]] && NOTE=" ${DIM}(FLYWP)${NC}"
+            echo -e "${GREEN}✓${NC} ${USER}${NC} @ ${TTY} | ${CYAN}${IP:-本機}${NC}${NOTE} | ${LOGIN_TIME}"
         fi
     done < <(who)
 fi
@@ -380,11 +405,25 @@ fi
 echo ""
 
 # ==========================================
-# Fail2Ban 規則檢查與更新（新增）
+# Fail2Ban 規則檢查與更新
 # ==========================================
 if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ban; then
     echo -e "${YELLOW}🛡️  Fail2Ban 規則檢查${NC}"
     echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
+    
+    # 顯示當前白名單
+    echo -e "${BOLD}${CYAN}▶ 當前白名單 IP:${NC}"
+    for ip in "${WHITELIST_IPS[@]}"; do
+        if [[ $ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            NOTE="${WHITELIST_NOTES[$ip]}"
+            if [ -n "$NOTE" ]; then
+                echo -e "  ${GREEN}•${NC} ${WHITE}${ip}${NC} ${DIM}(${NOTE})${NC}"
+            else
+                echo -e "  ${GREEN}•${NC} ${WHITE}${ip}${NC}"
+            fi
+        fi
+    done
+    echo ""
     
     # 獲取當前規則
     CURRENT_MAXRETRY=$(fail2ban-client get sshd maxretry 2>/dev/null || echo "5")
@@ -399,20 +438,23 @@ if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ba
     
     # 檢查規則是否需要更新
     if [ "$CURRENT_MAXRETRY" -ne 3 ] || [ "$CURRENT_FINDTIME" -ne 86400 ] || [ "$CURRENT_BANTIME" -ne 86400 ]; then
-        echo -e "${YELLOW}⚠ 規則不符合建議設定（一天內 3 次失敗 = 封鎖 24h）${NC}"
+        echo -e "${YELLOW}⚠ 規則不符合建議設定(一天內 3 次失敗 = 封鎖 24h)${NC}"
         echo -ne "${CYAN}正在更新 Fail2Ban 規則...${NC}"
         
         # 備份舊設定
         cp /etc/fail2ban/jail.local /etc/fail2ban/jail.local.bak 2>/dev/null
         
-        # 獲取當前登入的 IP 加入白名單
+        # 獲取當前登入的 IP
         CURRENT_IP=$(who am i | awk '{print $5}' | tr -d '()')
-        [ -z "$CURRENT_IP" ] && CURRENT_IP="114.39.15.79"
+        
+        # 建立白名單字串
+        IGNORE_IP_STRING="${WHITELIST_IPS[*]}"
+        [ -n "$CURRENT_IP" ] && IGNORE_IP_STRING="${IGNORE_IP_STRING} ${CURRENT_IP}"
         
         # 套用新規則
         cat >/etc/fail2ban/jail.local <<EOF
 [DEFAULT]
-ignoreip = 127.0.0.1/8 ::1 114.39.15.79 114.39.15.120 ${CURRENT_IP}
+ignoreip = ${IGNORE_IP_STRING}
 bantime = 24h
 findtime = 1d
 maxretry = 3
@@ -437,7 +479,6 @@ EOF
         if systemctl is-active --quiet fail2ban; then
             echo -e " ${GREEN}✓ 完成${NC}"
             echo -e "${GREEN}✓ 新規則已套用: 一天內 3 次失敗 = 封鎖 24 小時${NC}"
-            echo -e "${DIM}   白名單: 114.39.15.79, 114.39.15.120, ${CURRENT_IP}${NC}"
         else
             echo -e " ${RED}✗ 失敗${NC}"
         fi
@@ -447,7 +488,7 @@ EOF
     echo ""
     
     # 顯示 IP 失敗次數統計
-    echo -e "${BOLD}${CYAN}▶ IP 失敗嘗試統計（Top 20）:${NC}"
+    echo -e "${BOLD}${CYAN}▶ IP 失敗嘗試統計(Top 20):${NC}"
     echo -e "${DIM}次數    IP 位址              狀態${NC}"
     
     if [ -f /var/log/auth.log ]; then
@@ -559,7 +600,7 @@ echo ""
 # ==========================================
 echo -e "${YELLOW}[2/4] 🦠 常見病毒檔名掃描${NC}"
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
-echo -e "${DIM}檢查項目: 常見病毒檔名 (c99, r57, wso, shell, backdoor)${NC}"
+echo -e "${DIM}檢查項目: 常見病毒檔名(c99, r57, wso, shell, backdoor)${NC}"
 echo -e "${DIM}排除路徑: vendor, cache, node_modules, backup, Text/Diff/Engine${NC}"
 echo ""
 
@@ -643,7 +684,7 @@ WEBSHELL_COUNT=$(wc -l <"$WEBSHELL_TMPFILE" 2>/dev/null || echo 0)
 
 if [ "$WEBSHELL_COUNT" -gt 0 ]; then
     echo -e "${RED}⚠ ${BOLD}發現 ${WEBSHELL_COUNT} 個可疑 PHP 檔案${NC}"
-    [ "$WEBSHELL_COUNT" -eq 20 ] && echo -e "${DIM}(顯示前 20 筆，可能還有更多)${NC}"
+    [ "$WEBSHELL_COUNT" -eq 20 ] && echo -e "${DIM}(顯示前 20 筆,可能還有更多)${NC}"
     echo ""
 
     while IFS= read -r file; do
@@ -680,7 +721,7 @@ echo ""
 if [ ${#SITE_THREATS[@]} -gt 0 ]; then
     echo -e "${YELLOW}[4/4] 🚨 疑似中毒網站提醒${NC}"
     echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
-    echo -e "${RED}${BOLD}以下網站發現多個可疑檔案，建議優先檢查:${NC}"
+    echo -e "${RED}${BOLD}以下網站發現多個可疑檔案,建議優先檢查:${NC}"
     echo ""
 
     for site in "${!SITE_THREATS[@]}"; do
@@ -773,11 +814,14 @@ else
 
         if [ $? -eq 0 ]; then
             CURRENT_IP=$(who am i | awk '{print $5}' | tr -d '()')
-            [ -z "$CURRENT_IP" ] && CURRENT_IP="114.39.15.79"
+            
+            # 建立白名單字串
+            IGNORE_IP_STRING="${WHITELIST_IPS[*]}"
+            [ -n "$CURRENT_IP" ] && IGNORE_IP_STRING="${IGNORE_IP_STRING} ${CURRENT_IP}"
             
             cat >/etc/fail2ban/jail.local <<EOF
 [DEFAULT]
-ignoreip = 127.0.0.1/8 ::1 114.39.15.79 114.39.15.120 ${CURRENT_IP}
+ignoreip = ${IGNORE_IP_STRING}
 bantime = 24h
 findtime = 1d
 maxretry = 3
@@ -801,13 +845,15 @@ EOF
 
             if systemctl is-active --quiet fail2ban; then
                 echo -e "${GREEN}✓ Fail2Ban 安裝成功並已啟動${NC}"
-                echo -e "   • 白名單: ${WHITE}114.39.15.79, 114.39.15.120, ${CURRENT_IP}${NC}"
+                echo -e "   • 白名單已包含: ${WHITE}114.39.15.79, 114.39.15.120 (管理員)${NC}"
+                echo -e "   • 白名單已包含: ${WHITE}49.13.31.45, 91.107.195.115, 168.119.100.163, 188.34.177.5 (FLYWP)${NC}"
+                [ -n "$CURRENT_IP" ] && echo -e "   • 白名單已包含: ${WHITE}${CURRENT_IP} (當前登入 IP)${NC}"
                 echo -e "   • 規則: ${WHITE}一天內 3 次失敗 = 封鎖 24 小時${NC}"
             else
-                echo -e "${RED}⚠ Fail2Ban 安裝失敗，請手動安裝${NC}"
+                echo -e "${RED}⚠ Fail2Ban 安裝失敗,請手動安裝${NC}"
             fi
         else
-            echo -e "${RED}⚠ Fail2Ban 安裝失敗，請手動安裝${NC}"
+            echo -e "${RED}⚠ Fail2Ban 安裝失敗,請手動安裝${NC}"
         fi
     fi
 fi
