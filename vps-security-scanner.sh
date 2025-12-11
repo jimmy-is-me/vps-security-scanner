@@ -4,12 +4,13 @@
 # VPS 安全掃描工具 v5.0.0 - 智慧威脅判斷版
 # GitHub: https://github.com/jimmy-is-me/vps-security-scanner
 # 新增功能:
-#  - 智慧威脅等級判斷(只警告真正危險的狀況)
+#  - 智慧威脅等級判斷(背景噪音/低/中/極高風險)
+#  - 只對極高風險 IP(>500次)觸發警告和自動封鎖
 #  - 成功登入監控
 #  - SSH Key 安全檢查
 #  - 攻擊模式分析
 #  - SSH 安全配置建議
-#  - 優化 Fail2Ban 規則
+#  - 防火牆規則確認與顯示
 #################################################
 
 # 顏色定義
@@ -97,6 +98,42 @@ build_scan_paths() {
     printf '%s\n' "${roots[@]}" | sort -u | tr '\n' ' '
 }
 
+# 判斷威脅等級
+get_threat_level() {
+    local count=$1
+    if [ "$count" -ge 500 ]; then
+        echo "CRITICAL"
+    elif [ "$count" -ge 100 ]; then
+        echo "MEDIUM"
+    elif [ "$count" -ge 20 ]; then
+        echo "LOW"
+    else
+        echo "NOISE"
+    fi
+}
+
+# 取得威脅等級顏色和名稱
+get_threat_display() {
+    local level=$1
+    case $level in
+        CRITICAL)
+            echo "${RED}極高風險${NC}"
+            ;;
+        MEDIUM)
+            echo "${YELLOW}中等風險${NC}"
+            ;;
+        LOW)
+            echo "${GREEN}低風險${NC}"
+            ;;
+        NOISE)
+            echo "${GREEN}背景噪音${NC}"
+            ;;
+        *)
+            echo "${DIM}未知${NC}"
+            ;;
+    esac
+}
+
 SCAN_PATHS="$(build_scan_paths)"
 
 # 計數器
@@ -104,6 +141,7 @@ THREATS_FOUND=0
 THREATS_CLEANED=0
 ALERTS=()
 CRITICAL_THREATS=0
+HIGH_RISK_IPS_COUNT=0
 declare -A SITE_THREATS
 
 # ==========================================
@@ -345,7 +383,71 @@ echo -e "${DIM}總連線: ${WHITE}${TOTAL_CONN}${DIM} | 監聽埠: ${WHITE}${LIS
 echo ""
 
 # ==========================================
-# SSH 安全配置檢查 (新增)
+# 防火牆規則檢查 (新增)
+# ==========================================
+echo -e "${YELLOW}🔥 防火牆規則檢查${NC}"
+echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
+
+# 檢查 UFW
+if command -v ufw &>/dev/null; then
+    UFW_STATUS=$(ufw status 2>/dev/null | head -1 | awk '{print $2}')
+    if [[ "$UFW_STATUS" == "active" ]]; then
+        echo -e "${GREEN}✓ UFW 防火牆: ${WHITE}運行中${NC}"
+        
+        # 顯示規則統計
+        RULE_COUNT=$(ufw status numbered 2>/dev/null | grep -c "^\[")
+        echo -e "   ${DIM}已配置 ${WHITE}${RULE_COUNT}${DIM} 條規則${NC}"
+        
+        # 顯示 SSH 規則
+        SSH_RULES=$(ufw status | grep -iE "(22|ssh)" | head -3)
+        if [ -n "$SSH_RULES" ]; then
+            echo -e "   ${DIM}SSH 相關規則:${NC}"
+            echo "$SSH_RULES" | while read line; do
+                echo -e "   ${DIM}• ${line}${NC}"
+            done
+        fi
+    else
+        echo -e "${YELLOW}⚡ UFW 防火牆: ${WHITE}未啟用${NC}"
+    fi
+    echo ""
+fi
+
+# 檢查 iptables
+if command -v iptables &>/dev/null; then
+    INPUT_RULES=$(iptables -L INPUT -n 2>/dev/null | grep -c "^ACCEPT\|^DROP\|^REJECT")
+    if [ "$INPUT_RULES" -gt 3 ]; then
+        echo -e "${GREEN}✓ iptables: ${WHITE}已配置 ${INPUT_RULES} 條 INPUT 規則${NC}"
+        
+        # 顯示 DROP/REJECT 規則
+        BLOCK_RULES=$(iptables -L INPUT -n 2>/dev/null | grep -E "^DROP|^REJECT" | wc -l)
+        [ "$BLOCK_RULES" -gt 0 ] && echo -e "   ${DIM}封鎖規則: ${WHITE}${BLOCK_RULES}${DIM} 條${NC}"
+    else
+        echo -e "${YELLOW}⚡ iptables: ${WHITE}無自訂規則 (使用預設 ACCEPT)${NC}"
+    fi
+    echo ""
+fi
+
+# 檢查 firewalld
+if command -v firewall-cmd &>/dev/null && systemctl is-active --quiet firewalld; then
+    echo -e "${GREEN}✓ firewalld: ${WHITE}運行中${NC}"
+    
+    DEFAULT_ZONE=$(firewall-cmd --get-default-zone 2>/dev/null)
+    ACTIVE_ZONES=$(firewall-cmd --get-active-zones 2>/dev/null | grep -v "^  " | wc -l)
+    
+    echo -e "   ${DIM}預設區域: ${WHITE}${DEFAULT_ZONE}${NC}"
+    echo -e "   ${DIM}活躍區域: ${WHITE}${ACTIVE_ZONES}${NC}"
+    echo ""
+fi
+
+# 如果都沒有
+if ! command -v ufw &>/dev/null && ! command -v iptables &>/dev/null && ! command -v firewall-cmd &>/dev/null; then
+    echo -e "${RED}⚠ 未偵測到防火牆系統${NC}"
+    echo -e "${DIM}建議安裝 UFW 或配置 iptables${NC}"
+    echo ""
+fi
+
+# ==========================================
+# SSH 安全配置檢查
 # ==========================================
 echo -e "${YELLOW}🔐 SSH 安全配置檢查${NC}"
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
@@ -390,7 +492,7 @@ if [ -f /root/.ssh/authorized_keys ]; then
     KEY_COUNT=$(grep -v "^#" /root/.ssh/authorized_keys 2>/dev/null | grep -c "ssh-")
     echo -e "${GREEN}✓ Root 已配置 ${KEY_COUNT} 把公鑰${NC}"
     
-    # 檢查可疑的金鑰(包含可疑註解或來源)
+    # 檢查可疑的金鑰
     SUSPICIOUS_KEYS=0
     while IFS= read -r line; do
         if [[ $line =~ (malware|backdoor|hack|shell|exploit) ]]; then
@@ -417,7 +519,7 @@ fi
 echo ""
 
 # ==========================================
-# 登入監控(優化 - 加入成功登入檢查)
+# 登入監控
 # ==========================================
 echo -e "${YELLOW}👤 系統登入監控${NC}"
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
@@ -436,7 +538,7 @@ if [ "$CURRENT_USERS" -gt 0 ]; then
         # 檢查是否為白名單 IP
         IS_WHITELIST=0
         for whitelisted in "${WHITELIST_IPS[@]}"; do
-            if [[ $IP == $whitelisted* ]] || [[ -z "$IP" ]]; then
+            if [[ $IP == ${whitelisted%%/*}* ]] || [[ -z "$IP" ]]; then
                 IS_WHITELIST=1
                 break
             fi
@@ -447,9 +549,8 @@ if [ "$CURRENT_USERS" -gt 0 ]; then
             add_alert "CRITICAL" "可疑外部 IP 登入: ${USER} 從 ${IP}"
             CRITICAL_THREATS=$((CRITICAL_THREATS + 1))
         else
-            NOTE=""
-            [[ $IP == "114.39.15.79" || $IP == "114.39.15.120" ]] && NOTE=" ${DIM}(管理員)${NC}"
-            [[ $IP == "49.13.31.45" || $IP == "91.107.195.115" || $IP == "168.119.100.163" || $IP == "188.34.177.5" ]] && NOTE=" ${DIM}(FLYWP)${NC}"
+            NOTE="${WHITELIST_NOTES[$IP]}"
+            [ -n "$NOTE" ] && NOTE=" ${DIM}(${NOTE})${NC}"
             echo -e "${GREEN}✓${NC} ${USER}${NC} @ ${TTY} | ${CYAN}${IP:-本機}${NC}${NOTE} | ${LOGIN_TIME}"
         fi
     done < <(who)
@@ -464,8 +565,8 @@ if [ -n "$RECENT_LOGINS" ]; then
         
         # 檢查是否為已知 IP
         IS_KNOWN=0
-        for whitelisted in "114.39.15.79" "114.39.15.120" "49.13.31.45" "91.107.195.115" "168.119.100.163" "188.34.177.5"; do
-            if [[ $LOGIN_IP == $whitelisted ]]; then
+        for ip in "${!WHITELIST_NOTES[@]}"; do
+            if [[ $LOGIN_IP == $ip ]]; then
                 IS_KNOWN=1
                 break
             fi
@@ -486,7 +587,7 @@ fi
 echo ""
 
 # ==========================================
-# 智慧失敗登入分析(優化)
+# 智慧失敗登入分析(優化 - 四級威脅分類)
 # ==========================================
 echo -e "${BOLD}${CYAN}▶ 失敗登入分析(智慧威脅判斷)${NC}"
 
@@ -507,58 +608,81 @@ if [ -n "$LOG_FILE" ]; then
     else
         echo -e "${DIM}總失敗嘗試: ${WHITE}${FAILED_COUNT}${NC} 次"
         
-        # 分析攻擊模式
+        # 分析攻擊模式 - 四級分類
         echo ""
         echo -e "${CYAN}攻擊模式分析:${NC}"
         
-        # 計算高集中度攻擊 (單一 IP > 500 次)
-        HIGH_RISK_IPS=$(grep "Failed password" "$LOG_FILE" 2>/dev/null | \
-            awk '{for(i=1;i<=NF;i++){if($i=="from"){print $(i+1)}}}' | \
-            grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | \
-            sort | uniq -c | sort -rn | awk '$1 > 500 {print $2}')
-        
-        HIGH_RISK_COUNT=$(echo "$HIGH_RISK_IPS" | grep -v "^$" | wc -l)
-        
-        if [ "$HIGH_RISK_COUNT" -gt 0 ]; then
-            echo -e "${RED}🔴 高集中度攻擊: ${HIGH_RISK_COUNT} 個 IP 超過 500 次失敗${NC}"
-            echo "$HIGH_RISK_IPS" | while read ip; do
-                ATTEMPTS=$(grep "Failed password" "$LOG_FILE" 2>/dev/null | grep -c "$ip")
-                echo -e "   ${RED}├─ ${ip} (${ATTEMPTS} 次)${NC}"
-            done
-            add_alert "CRITICAL" "高集中度爆破攻擊: ${HIGH_RISK_COUNT} 個 IP"
-            CRITICAL_THREATS=$((CRITICAL_THREATS + HIGH_RISK_COUNT))
-        else
-            echo -e "${GREEN}✓ 無高集中度攻擊 (所有 IP < 500 次)${NC}"
-        fi
-        
-        # 顯示前 10 名攻擊來源
-        echo ""
-        echo -e "${CYAN}失敗次數 TOP 10:${NC}"
-        echo -e "${DIM}次數    IP 位址              威脅等級${NC}"
+        # 建立臨時檔案儲存分析結果
+        ANALYSIS_TMP=$(mktemp)
         
         grep "Failed password" "$LOG_FILE" 2>/dev/null | \
         awk '{for(i=1;i<=NF;i++){if($i=="from"){print $(i+1)}}}' | \
         grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | \
-        sort | uniq -c | sort -rn | head -10 | \
+        sort | uniq -c | sort -rn > "$ANALYSIS_TMP"
+        
+        # 統計各等級數量
+        CRITICAL_COUNT=0
+        MEDIUM_COUNT=0
+        LOW_COUNT=0
+        NOISE_COUNT=0
+        
         while read count ip; do
-            if [ "$count" -ge 500 ]; then
-                LEVEL="${RED}極高風險${NC}"
-            elif [ "$count" -ge 100 ]; then
-                LEVEL="${YELLOW}中等風險${NC}"
-            elif [ "$count" -ge 20 ]; then
-                LEVEL="${GREEN}低風險${NC}"
-            else
-                LEVEL="${GREEN}背景噪音${NC}"
-            fi
-            printf "${WHITE}%-7d ${CYAN}%-20s ${NC}%b\n" "$count" "$ip" "$LEVEL"
+            LEVEL=$(get_threat_level "$count")
+            case $LEVEL in
+                CRITICAL) CRITICAL_COUNT=$((CRITICAL_COUNT + 1)) ;;
+                MEDIUM) MEDIUM_COUNT=$((MEDIUM_COUNT + 1)) ;;
+                LOW) LOW_COUNT=$((LOW_COUNT + 1)) ;;
+                NOISE) NOISE_COUNT=$((NOISE_COUNT + 1)) ;;
+            esac
+        done < "$ANALYSIS_TMP"
+        
+        # 顯示統計
+        echo -e "${DIM}威脅統計:${NC}"
+        [ "$CRITICAL_COUNT" -gt 0 ] && echo -e "  ${RED}• 極高風險 (>500次): ${CRITICAL_COUNT} 個 IP${NC}"
+        [ "$MEDIUM_COUNT" -gt 0 ] && echo -e "  ${YELLOW}• 中等風險 (100-500次): ${MEDIUM_COUNT} 個 IP${NC}"
+        [ "$LOW_COUNT" -gt 0 ] && echo -e "  ${GREEN}• 低風險 (20-100次): ${LOW_COUNT} 個 IP${NC}"
+        [ "$NOISE_COUNT" -gt 0 ] && echo -e "  ${GREEN}• 背景噪音 (<20次): ${NOISE_COUNT} 個 IP${NC}"
+        
+        # 只對極高風險發出警告
+        if [ "$CRITICAL_COUNT" -gt 0 ]; then
+            echo ""
+            echo -e "${RED}🔴 偵測到 ${CRITICAL_COUNT} 個極高風險 IP (>500次失敗)${NC}"
+            
+            HIGH_RISK_IPS=""
+            while read count ip; do
+                if [ "$count" -ge 500 ]; then
+                    echo -e "   ${RED}├─ ${ip} (${count} 次)${NC}"
+                    HIGH_RISK_IPS="${HIGH_RISK_IPS} ${ip}"
+                    HIGH_RISK_IPS_COUNT=$((HIGH_RISK_IPS_COUNT + 1))
+                fi
+            done < "$ANALYSIS_TMP"
+            
+            add_alert "CRITICAL" "極高風險爆破攻擊: ${CRITICAL_COUNT} 個 IP"
+            CRITICAL_THREATS=$((CRITICAL_THREATS + CRITICAL_COUNT))
+        else
+            echo ""
+            echo -e "${GREEN}✓ 無極高風險攻擊 (所有 IP < 500 次)${NC}"
+        fi
+        
+        # 顯示前 15 名 (包含所有等級以供參考)
+        echo ""
+        echo -e "${CYAN}失敗次數 TOP 15:${NC}"
+        echo -e "${DIM}次數    IP 位址              威脅等級${NC}"
+        
+        head -15 "$ANALYSIS_TMP" | while read count ip; do
+            LEVEL=$(get_threat_level "$count")
+            DISPLAY=$(get_threat_display "$LEVEL")
+            printf "${WHITE}%-7d ${CYAN}%-20s ${NC}%b\n" "$count" "$ip" "$DISPLAY"
         done
         
+        rm -f "$ANALYSIS_TMP"
+        
         echo ""
-        echo -e "${DIM}💡 判斷說明:${NC}"
-        echo -e "${DIM}• ${GREEN}背景噪音${NC}${DIM}: 1-20 次 (正常網路掃描)${NC}"
-        echo -e "${DIM}• ${GREEN}低風險${NC}${DIM}: 20-100 次 (隨機掃描)${NC}"
-        echo -e "${DIM}• ${YELLOW}中等風險${NC}${DIM}: 100-500 次 (持續嘗試)${NC}"
-        echo -e "${DIM}• ${RED}極高風險${NC}${DIM}: >500 次 (集中攻擊,需立即處理)${NC}"
+        echo -e "${DIM}💡 威脅等級說明:${NC}"
+        echo -e "${DIM}• ${GREEN}背景噪音${NC}${DIM}: 1-19 次 (正常網路掃描,無需處理)${NC}"
+        echo -e "${DIM}• ${GREEN}低風險${NC}${DIM}: 20-99 次 (隨機掃描,Fail2Ban 可處理)${NC}"
+        echo -e "${DIM}• ${YELLOW}中等風險${NC}${DIM}: 100-499 次 (持續嘗試,需監控)${NC}"
+        echo -e "${DIM}• ${RED}極高風險${NC}${DIM}: ≥500 次 (集中攻擊,需立即封鎖)${NC}"
     fi
 else
     echo -e "${YELLOW}⚡ 找不到日誌檔案,無法分析${NC}"
@@ -574,15 +698,9 @@ if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ba
     
     # 顯示當前白名單
     echo -e "${BOLD}${CYAN}▶ 白名單配置:${NC}"
-    for ip in "${WHITELIST_IPS[@]}"; do
-        if [[ $ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            NOTE="${WHITELIST_NOTES[$ip]}"
-            if [ -n "$NOTE" ]; then
-                echo -e "  ${GREEN}•${NC} ${WHITE}${ip}${NC} ${DIM}(${NOTE})${NC}"
-            else
-                echo -e "  ${GREEN}•${NC} ${WHITE}${ip}${NC}"
-            fi
-        fi
+    for ip in "${!WHITELIST_NOTES[@]}"; do
+        NOTE="${WHITELIST_NOTES[$ip]}"
+        echo -e "  ${GREEN}•${NC} ${WHITE}${ip}${NC} ${DIM}(${NOTE})${NC}"
     done
     echo ""
     
@@ -613,7 +731,7 @@ if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ba
             echo -ne "${CYAN}正在更新 Fail2Ban 規則...${NC}"
             
             # 備份
-            cp /etc/fail2ban/jail.local /etc/fail2ban/jail.local.bak.$(date +%Y%m%d) 2>/dev/null
+            cp /etc/fail2ban/jail.local /etc/fail2ban/jail.local.bak.$(date +%Y%m%d_%H%M%S) 2>/dev/null
             
             # 獲取當前登入 IP
             CURRENT_IP=$(who am i | awk '{print $5}' | tr -d '()')
@@ -659,14 +777,14 @@ EOF
     fi
     echo ""
     
-    # 處理高風險 IP
-    if [ "$HIGH_RISK_COUNT" -gt 0 ] && [ -n "$HIGH_RISK_IPS" ]; then
-        echo -e "${YELLOW}🎯 處理高風險 IP (>500 次失敗)${NC}"
+    # 只處理極高風險 IP (>500次)
+    if [ "$HIGH_RISK_IPS_COUNT" -gt 0 ] && [ -n "$HIGH_RISK_IPS" ]; then
+        echo -e "${YELLOW}🎯 處理極高風險 IP (>500 次失敗)${NC}"
         
         BANNED_IPS=$(fail2ban-client status sshd 2>/dev/null | grep "Banned IP list" | awk -F: '{print $2}')
         
         NEWLY_BANNED=0
-        echo "$HIGH_RISK_IPS" | while read ip; do
+        for ip in $HIGH_RISK_IPS; do
             if ! echo "$BANNED_IPS" | grep -q "$ip"; then
                 fail2ban-client set sshd banip "$ip" >/dev/null 2>&1
                 if [ $? -eq 0 ]; then
@@ -677,6 +795,8 @@ EOF
                 echo -e "${DIM}• 已封鎖: ${ip}${NC}"
             fi
         done
+        
+        [ "$NEWLY_BANNED" -gt 0 ] && echo -e "${GREEN}新增封鎖 ${NEWLY_BANNED} 個極高風險 IP${NC}"
         echo ""
     fi
     
@@ -691,10 +811,10 @@ EOF
     
 else
     # 自動安裝 Fail2Ban
-    if [ "$CRITICAL_THREATS" -gt 0 ] || [ "$HIGH_RISK_COUNT" -gt 0 ]; then
+    if [ "$CRITICAL_THREATS" -gt 0 ] || [ "$HIGH_RISK_IPS_COUNT" -gt 0 ]; then
         echo -e "${YELLOW}🛡️  Fail2Ban 未安裝${NC}"
         echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
-        echo -e "${RED}⚠ 偵測到安全威脅,強烈建議安裝 Fail2Ban${NC}"
+        echo -e "${RED}⚠ 偵測到 ${CRITICAL_THREATS} 個重大安全威脅,強烈建議安裝 Fail2Ban${NC}"
         echo -ne "${CYAN}是否立即安裝? (y/N): ${NC}"
         read -t 10 -n 1 INSTALL_CHOICE
         echo ""
@@ -740,7 +860,16 @@ EOF
                 sleep 2
                 
                 if systemctl is-active --quiet fail2ban; then
-                    echo -e "${GREEN}✓ Fail2Ban 安裝成功${NC}"
+                    echo -e "${GREEN}✓ Fail2Ban 安裝成功並已啟動${NC}"
+                    
+                    # 立即封鎖極高風險 IP
+                    if [ -n "$HIGH_RISK_IPS" ]; then
+                        echo -e "${CYAN}正在封鎖極高風險 IP...${NC}"
+                        for ip in $HIGH_RISK_IPS; do
+                            fail2ban-client set sshd banip "$ip" >/dev/null 2>&1
+                            echo -e "${GREEN}✓ 已封鎖: ${ip}${NC}"
+                        done
+                    fi
                 else
                     echo -e "${RED}⚠ Fail2Ban 啟動失敗${NC}"
                 fi
@@ -748,7 +877,8 @@ EOF
                 echo -e "${RED}⚠ Fail2Ban 安裝失敗${NC}"
             fi
         else
-            echo -e "${YELLOW}⚠ 已跳過安裝,建議手動安裝 Fail2Ban${NC}"
+            echo -e "${YELLOW}⚠ 已跳過安裝${NC}"
+            echo -e "${DIM}建議手動安裝: apt install fail2ban${NC}"
         fi
         echo ""
     fi
@@ -954,6 +1084,7 @@ fi
 echo -e "${BOLD}威脅等級:${NC} ${THREAT_LEVEL}"
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
 echo -e "發現威脅: ${WHITE}${THREATS_FOUND}${NC} | 關鍵威脅: ${RED}${CRITICAL_THREATS}${NC} | 已清除: ${GREEN}${THREATS_CLEANED}${NC}"
+[ "$HIGH_RISK_IPS_COUNT" -gt 0 ] && echo -e "極高風險 IP: ${RED}${HIGH_RISK_IPS_COUNT}${NC} 個已處理"
 
 if [ ${#ALERTS[@]} -gt 0 ]; then
     echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
