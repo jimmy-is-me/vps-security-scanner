@@ -1,9 +1,10 @@
 #!/bin/bash
 
 #################################################
-# VPS 安全掃描工具 v5.0.0 - 智慧威脅判斷版
+# VPS 安全掃描工具 v5.1.0 - 寬鬆防火牆版
 # GitHub: https://github.com/jimmy-is-me/vps-security-scanner
-# 新增功能:
+# 修改項目:
+#  - Fail2Ban 規則: 1小時內10次失敗 = 封鎖1小時 (避免誤封)
 #  - 智慧威脅等級判斷(背景噪音/低/中/極高風險)
 #  - 只對極高風險 IP(>500次)觸發警告和自動封鎖
 #  - 成功登入監控
@@ -24,7 +25,7 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="5.0.0"
+VERSION="5.1.0"
 
 # 白名單 IP 定義
 WHITELIST_IPS=(
@@ -383,7 +384,7 @@ echo -e "${DIM}總連線: ${WHITE}${TOTAL_CONN}${DIM} | 監聽埠: ${WHITE}${LIS
 echo ""
 
 # ==========================================
-# 防火牆規則檢查 (新增)
+# 防火牆規則檢查
 # ==========================================
 echo -e "${YELLOW}🔥 防火牆規則檢查${NC}"
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
@@ -587,7 +588,7 @@ fi
 echo ""
 
 # ==========================================
-# 智慧失敗登入分析(優化 - 四級威脅分類)
+# 智慧失敗登入分析
 # ==========================================
 echo -e "${BOLD}${CYAN}▶ 失敗登入分析(智慧威脅判斷)${NC}"
 
@@ -690,7 +691,7 @@ fi
 echo ""
 
 # ==========================================
-# Fail2Ban 規則管理(優化)
+# Fail2Ban 規則管理(寬鬆配置)
 # ==========================================
 if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ban; then
     echo -e "${YELLOW}🛡️  Fail2Ban 防護狀態${NC}"
@@ -715,14 +716,14 @@ if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ba
     echo -e "${DIM}封鎖時間: ${WHITE}${CURRENT_BANTIME}${NC} 秒 ${DIM}($(awk -v t="$CURRENT_BANTIME" 'BEGIN{if(t>=86400){printf "%.0f天", t/86400}else if(t>=3600){printf "%.1f小時", t/3600}else{printf "%.0f分", t/60}}'))${NC}"
     echo ""
     
-    # 檢查是否需要更新規則
+    # 檢查是否需要更新規則 (修改為寬鬆配置: 1小時內10次失敗才封鎖1小時)
     NEED_UPDATE=0
-    if [ "$CURRENT_MAXRETRY" -ne 3 ] || [ "$CURRENT_FINDTIME" -ne 86400 ] || [ "$CURRENT_BANTIME" -ne 86400 ]; then
+    if [ "$CURRENT_MAXRETRY" -ne 10 ] || [ "$CURRENT_FINDTIME" -ne 3600 ] || [ "$CURRENT_BANTIME" -ne 3600 ]; then
         NEED_UPDATE=1
     fi
     
     if [ "$NEED_UPDATE" -eq 1 ]; then
-        echo -e "${YELLOW}⚠ 建議更新規則為: 一天內 3 次失敗 = 封鎖 24h${NC}"
+        echo -e "${YELLOW}⚠ 建議更新規則為: 1小時內 10 次失敗 = 封鎖 1h (避免誤封)${NC}"
         echo -ne "${CYAN}是否立即更新? (y/N): ${NC}"
         read -t 10 -n 1 UPDATE_CHOICE
         echo ""
@@ -740,13 +741,13 @@ if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ba
             IGNORE_IP_STRING="${WHITELIST_IPS[*]}"
             [ -n "$CURRENT_IP" ] && IGNORE_IP_STRING="${IGNORE_IP_STRING} ${CURRENT_IP}"
             
-            # 更新配置
+            # 更新配置 (寬鬆規則)
             cat >/etc/fail2ban/jail.local <<EOF
 [DEFAULT]
 ignoreip = ${IGNORE_IP_STRING}
-bantime = 24h
-findtime = 1d
-maxretry = 3
+bantime = 1h
+findtime = 1h
+maxretry = 10
 destemail = 
 action = %(action_)s
 
@@ -754,9 +755,9 @@ action = %(action_)s
 enabled = true
 port = ssh
 logpath = /var/log/auth.log
-maxretry = 3
-bantime = 24h
-findtime = 1d
+maxretry = 10
+bantime = 1h
+findtime = 1h
 EOF
             
             [ -f /etc/redhat-release ] && sed -i 's|logpath = /var/log/auth.log|logpath = /var/log/secure|' /etc/fail2ban/jail.local
@@ -773,7 +774,7 @@ EOF
             echo -e "${DIM}跳過更新${NC}"
         fi
     else
-        echo -e "${GREEN}✓ 規則已是最佳配置${NC}"
+        echo -e "${GREEN}✓ 規則已是最佳配置 (寬鬆模式)${NC}"
     fi
     echo ""
     
@@ -810,7 +811,7 @@ EOF
     echo ""
     
 else
-    # 自動安裝 Fail2Ban
+    # 自動安裝 Fail2Ban (寬鬆配置)
     if [ "$CRITICAL_THREATS" -gt 0 ] || [ "$HIGH_RISK_IPS_COUNT" -gt 0 ]; then
         echo -e "${YELLOW}🛡️  Fail2Ban 未安裝${NC}"
         echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
@@ -835,12 +836,13 @@ else
                 IGNORE_IP_STRING="${WHITELIST_IPS[*]}"
                 [ -n "$CURRENT_IP" ] && IGNORE_IP_STRING="${IGNORE_IP_STRING} ${CURRENT_IP}"
                 
+                # 安裝時使用寬鬆配置
                 cat >/etc/fail2ban/jail.local <<EOF
 [DEFAULT]
 ignoreip = ${IGNORE_IP_STRING}
-bantime = 24h
-findtime = 1d
-maxretry = 3
+bantime = 1h
+findtime = 1h
+maxretry = 10
 destemail = 
 action = %(action_)s
 
@@ -848,9 +850,9 @@ action = %(action_)s
 enabled = true
 port = ssh
 logpath = /var/log/auth.log
-maxretry = 3
-bantime = 24h
-findtime = 1d
+maxretry = 10
+bantime = 1h
+findtime = 1h
 EOF
                 
                 [ -f /etc/redhat-release ] && sed -i 's|logpath = /var/log/auth.log|logpath = /var/log/secure|' /etc/fail2ban/jail.local
@@ -860,7 +862,7 @@ EOF
                 sleep 2
                 
                 if systemctl is-active --quiet fail2ban; then
-                    echo -e "${GREEN}✓ Fail2Ban 安裝成功並已啟動${NC}"
+                    echo -e "${GREEN}✓ Fail2Ban 安裝成功並已啟動 (使用寬鬆規則)${NC}"
                     
                     # 立即封鎖極高風險 IP
                     if [ -n "$HIGH_RISK_IPS" ]; then
@@ -927,7 +929,7 @@ if [ "$TOTAL_SUSPICIOUS" -gt 0 ]; then
     ps aux | awk 'length($11) == 8 && $11 ~ /^[a-z0-9]+$/' | grep -v "USER" | awk '{print $2}' | xargs kill -9 2>/dev/null
     ps aux | grep -iE "xmrig|minerd|cpuminer" | grep -v grep | awk '{print $2}' | xargs kill -9 2>/dev/null
     THREATS_CLEANED=$((THREATS_CLEANED + TOTAL_SUSPICIOUS))
-    echo -e " ${GREEN}✓ 完成！${NC}"
+    echo -e " ${GREEN}✓ 完成!${NC}"
 else
     echo -e "${GREEN}✓ 未發現可疑 process${NC}"
 fi
@@ -1064,7 +1066,7 @@ if [ ${#SITE_THREATS[@]} -gt 0 ]; then
 fi
 
 # ==========================================
-# 總結報告(優化)
+# 總結報告
 # ==========================================
 echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════════${NC}"
 echo -e "${BOLD}${CYAN}   🛡️  掃描結果總結${NC}"
@@ -1112,7 +1114,7 @@ if [ "$CRITICAL_THREATS" -eq 0 ] && [ "$THREATS_FOUND" -lt 5 ]; then
     echo -e "${GREEN}✓ 主機安全狀況良好${NC}"
     echo -e "${DIM}  • 持續監控登入記錄${NC}"
     echo -e "${DIM}  • 定期更新系統與軟體${NC}"
-    echo -e "${DIM}  • Fail2Ban 持續運作中${NC}"
+    echo -e "${DIM}  • Fail2Ban 持續運作中 (寬鬆模式)${NC}"
 else
     echo -e "${YELLOW}⚠ 建議立即處理發現的威脅${NC}"
     echo -e "${DIM}  • 檢查並刪除可疑檔案${NC}"
