@@ -1,11 +1,11 @@
 #!/bin/bash
 
 #################################################
-# VPS 系統資源與安全掃描工具 v6.6.0 - 完整版
+# VPS 系統資源與安全掃描工具 v6.7.0 - 完整版
 # 修正項目:
-#  1. 大目錄占用 du -h --max-depth=2 /home
-#  2. Fail2Ban 顯示目前規則與封鎖清單
-#  3. 記憶體 TOP 10 + 按網站統計記憶體占用
+#  1. 若無 fail2ban 則自動安裝 (10分鐘/5次/封1小時)
+#  2. 顯示所有 Fail2Ban 監控狀態
+#  3. 自動封鎖極高風險 IP (>500次) 1小時
 #################################################
 
 # 顏色定義
@@ -19,7 +19,7 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="6.6.0"
+VERSION="6.7.0"
 
 # 掃描範圍
 SCAN_ROOT_BASE=(
@@ -110,6 +110,7 @@ THREATS_CLEANED=0
 ALERTS=()
 CRITICAL_THREATS=0
 HIGH_RISK_IPS_COUNT=0
+HIGH_RISK_IPS=""
 declare -A SITE_THREATS
 
 # ==========================================
@@ -281,7 +282,6 @@ echo -e "${DIM}按網站/用戶統計記憶體占用:${NC}"
 if [ -d "/home/fly" ]; then
     declare -A SITE_MEM
     
-    # 統計每個網站的 PHP-FPM 記憶體
     while IFS= read -r site_dir; do
         SITE_NAME=$(basename "$site_dir")
         MEM_USAGE=$(ps aux | grep "php-fpm.*${SITE_NAME}" | grep -v grep | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
@@ -291,7 +291,6 @@ if [ -d "/home/fly" ]; then
         fi
     done < <(find /home/fly -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
     
-    # 排序顯示 TOP 10
     if [ ${#SITE_MEM[@]} -gt 0 ]; then
         for site in "${!SITE_MEM[@]}"; do
             echo "${SITE_MEM[$site]} $site"
@@ -309,9 +308,8 @@ if [ -d "/home/fly" ]; then
         echo -e "  ${DIM}無法統計(非 FlyWP 架構)${NC}"
     fi
 else
-    # 通用統計: 按用戶統計 PHP-FPM
     echo -e "  ${DIM}按用戶統計:${NC}"
-    ps aux | grep -E "[p]hp-fpm" | awk '{user=$1; mem+=$6} END {for(u in mem) printf "  %-10s %dM\n", u, mem[u]/1024}' | sort -k2 -rn | head -10
+    ps aux | grep -E "[p]hp-fpm" | awk '{mem[$1]+=$6} END {for(u in mem) printf "  %-10s %dM\n", u, mem[u]/1024}' | sort -k2 -rn | head -10
 fi
 echo ""
 
@@ -393,7 +391,6 @@ echo -e "${DIM}大目錄占用分析 (depth=2):${NC}"
 
 if [ -d "/home" ]; then
     du -h --max-depth=2 /home 2>/dev/null | sort -rh | head -15 | while read size dir; do
-        # 過濾掉總計行
         if [[ ! "$dir" =~ ^/home$ ]]; then
             echo -e "  ${WHITE}${size}${NC} ${DIM}${dir}${NC}"
         fi
@@ -556,67 +553,82 @@ fi
 echo ""
 
 # ==========================================
-# Fail2Ban 規則管理 (顯示目前規則與封鎖清單)
+# 失敗登入分析 (先執行以收集極高風險 IP)
 # ==========================================
-if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ban; then
-    echo -e "${YELLOW}🛡️  Fail2Ban 防護狀態${NC}"
-    echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
+if [ -f /var/log/auth.log ]; then
+    LOG_FILE="/var/log/auth.log"
+elif [ -f /var/log/secure ]; then
+    LOG_FILE="/var/log/secure"
+else
+    LOG_FILE=""
+fi
+
+FAILED_COUNT=0
+CRITICAL_COUNT=0
+
+if [ -n "$LOG_FILE" ]; then
+    FAILED_COUNT=$(grep "Failed password" "$LOG_FILE" 2>/dev/null | wc -l)
     
-    CURRENT_MAXRETRY=$(fail2ban-client get sshd maxretry 2>/dev/null || echo "5")
-    CURRENT_FINDTIME=$(fail2ban-client get sshd findtime 2>/dev/null || echo "600")
-    CURRENT_BANTIME=$(fail2ban-client get sshd bantime 2>/dev/null || echo "3600")
-    
-    echo -e "${BOLD}${CYAN}▶ 目前規則:${NC}"
-    echo -e "${DIM}失敗次數: ${WHITE}${CURRENT_MAXRETRY}${NC} 次 ${DIM}(建議: 10)${NC}"
-    echo -e "${DIM}時間窗口: ${WHITE}${CURRENT_FINDTIME}${NC} 秒 ${DIM}(建議: 3600)${NC}"
-    echo -e "${DIM}封鎖時間: ${WHITE}${CURRENT_BANTIME}${NC} 秒 ${DIM}(建議: 3600)${NC}"
-    echo ""
-    
-    # 顯示目前封鎖清單
-    BANNED_NOW=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
-    TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $NF}')
-    
-    echo -e "${BOLD}${CYAN}▶ 封鎖統計:${NC}"
-    echo -e "${DIM}當前封鎖: ${WHITE}${BANNED_NOW:-0}${NC} 個 IP"
-    echo -e "${DIM}累計封鎖: ${WHITE}${TOTAL_BANNED:-0}${NC} 次"
-    
-    # 顯示被封鎖的 IP 清單
-    if [ "${BANNED_NOW:-0}" -gt 0 ]; then
-        echo ""
-        echo -e "${DIM}目前被封鎖的 IP:${NC}"
-        BANNED_IPS=$(fail2ban-client status sshd 2>/dev/null | grep "Banned IP list:" | sed 's/.*Banned IP list://')
+    if [ "$FAILED_COUNT" -gt 0 ]; then
+        ANALYSIS_TMP=$(mktemp)
         
-        if [ -n "$BANNED_IPS" ]; then
-            for ip in $BANNED_IPS; do
-                echo -e "  ${RED}├─ ${ip}${NC}"
-            done
+        grep "Failed password" "$LOG_FILE" 2>/dev/null | \
+        awk '{for(i=1;i<=NF;i++){if($i=="from"){print $(i+1)}}}' | \
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | \
+        sort | uniq -c | sort -rn > "$ANALYSIS_TMP"
+        
+        # 收集極高風險 IP
+        while read count ip; do
+            if [ "$count" -ge 500 ]; then
+                HIGH_RISK_IPS="${HIGH_RISK_IPS} ${ip}"
+                HIGH_RISK_IPS_COUNT=$((HIGH_RISK_IPS_COUNT + 1))
+                CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
+            fi
+        done < "$ANALYSIS_TMP"
+        
+        if [ "$CRITICAL_COUNT" -gt 0 ]; then
+            add_alert "CRITICAL" "極高風險爆破: ${CRITICAL_COUNT} 個 IP"
+            CRITICAL_THREATS=$((CRITICAL_THREATS + CRITICAL_COUNT))
         fi
     fi
+fi
+
+# ==========================================
+# Fail2Ban 安裝與管理
+# ==========================================
+echo -e "${YELLOW}🛡️  Fail2Ban 防護狀態${NC}"
+echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
+
+# 檢查是否已安裝 Fail2Ban
+if ! command -v fail2ban-client &>/dev/null; then
+    echo -e "${YELLOW}⚠ Fail2Ban 未安裝${NC}"
+    echo -ne "${CYAN}是否立即安裝? (y/N): ${NC}"
+    read -t 10 -n 1 INSTALL_CHOICE
     echo ""
     
-    NEED_UPDATE=0
-    if [ "$CURRENT_MAXRETRY" -ne 10 ] || [ "$CURRENT_FINDTIME" -ne 3600 ] || [ "$CURRENT_BANTIME" -ne 3600 ]; then
-        NEED_UPDATE=1
-    fi
-    
-    if [ "$NEED_UPDATE" -eq 1 ]; then
-        echo -e "${YELLOW}⚠ 建議更新規則: 1小時/10次/封1小時${NC}"
-        echo -ne "${CYAN}是否立即更新? (y/N): ${NC}"
-        read -t 10 -n 1 UPDATE_CHOICE
-        echo ""
+    if [[ "$INSTALL_CHOICE" =~ ^[Yy]$ ]]; then
+        echo -ne "${CYAN}正在安裝 Fail2Ban...${NC}"
         
-        if [[ "$UPDATE_CHOICE" =~ ^[Yy]$ ]]; then
-            echo -ne "${CYAN}正在更新 Fail2Ban 規則...${NC}"
+        if [ -f /etc/debian_version ]; then
+            apt-get update -qq >/dev/null 2>&1
+            DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban >/dev/null 2>&1
+        elif [ -f /etc/redhat-release ]; then
+            yum install -y epel-release >/dev/null 2>&1
+            yum install -y fail2ban >/dev/null 2>&1
+        fi
+        
+        if command -v fail2ban-client &>/dev/null; then
+            echo -e " ${GREEN}✓ 完成${NC}"
             
+            # 設定規則: 10分鐘/5次/封1小時
             CURRENT_IP=$(who am i | awk '{print $5}' | tr -d '()')
             
-            # 直接覆蓋(不備份,無白名單)
             cat >/etc/fail2ban/jail.local <<EOF
 [DEFAULT]
 ignoreip = 127.0.0.1/8 ::1 ${CURRENT_IP}
 bantime = 1h
-findtime = 1h
-maxretry = 10
+findtime = 10m
+maxretry = 5
 destemail = 
 action = %(action_)s
 
@@ -624,27 +636,83 @@ action = %(action_)s
 enabled = true
 port = ssh
 logpath = /var/log/auth.log
-maxretry = 10
+maxretry = 5
 bantime = 1h
-findtime = 1h
+findtime = 10m
 EOF
             
             [ -f /etc/redhat-release ] && sed -i 's|logpath = /var/log/auth.log|logpath = /var/log/secure|' /etc/fail2ban/jail.local
             
-            systemctl restart fail2ban >/dev/null 2>&1
+            systemctl enable fail2ban >/dev/null 2>&1
+            systemctl start fail2ban >/dev/null 2>&1
             sleep 2
             
-            if systemctl is-active --quiet fail2ban; then
-                echo -e " ${GREEN}✓ 完成${NC}"
-            else
-                echo -e " ${RED}✗ 失敗${NC}"
-            fi
+            echo -e "${GREEN}✓ Fail2Ban 已啟動 (10分鐘/5次/封1小時)${NC}"
+            echo ""
         else
-            echo -e "${DIM}跳過更新${NC}"
+            echo -e " ${RED}✗ 安裝失敗${NC}"
         fi
     else
-        echo -e "${GREEN}✓ 規則已是最佳配置${NC}"
+        echo -e "${DIM}跳過安裝${NC}"
+        echo ""
     fi
+fi
+
+# 顯示 Fail2Ban 狀態
+if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ban; then
+    echo -e "${BOLD}${CYAN}▶ 所有監控狀態:${NC}"
+    fail2ban-client status 2>/dev/null | while read line; do
+        echo -e "${DIM}${line}${NC}"
+    done
+    echo ""
+    
+    echo -e "${BOLD}${CYAN}▶ SSHD 詳細狀態:${NC}"
+    fail2ban-client status sshd 2>/dev/null | while read line; do
+        if [[ "$line" =~ "Currently banned" ]]; then
+            echo -e "${RED}${line}${NC}"
+        elif [[ "$line" =~ "Total banned" ]]; then
+            echo -e "${YELLOW}${line}${NC}"
+        else
+            echo -e "${DIM}${line}${NC}"
+        fi
+    done
+    echo ""
+    
+    # 自動封鎖極高風險 IP
+    if [ "$HIGH_RISK_IPS_COUNT" -gt 0 ] && [ -n "$HIGH_RISK_IPS" ]; then
+        echo -e "${RED}🚨 發現 ${HIGH_RISK_IPS_COUNT} 個極高風險 IP (>500次失敗登入)${NC}"
+        echo -ne "${CYAN}是否立即封鎖 1 小時? (y/N): ${NC}"
+        read -t 10 -n 1 BAN_CHOICE
+        echo ""
+        
+        if [[ "$BAN_CHOICE" =~ ^[Yy]$ ]]; then
+            echo -e "${CYAN}正在封鎖極高風險 IP...${NC}"
+            BANNED_COUNT=0
+            
+            for ip in $HIGH_RISK_IPS; do
+                # 檢查是否已被封鎖
+                if ! fail2ban-client status sshd 2>/dev/null | grep -q "$ip"; then
+                    fail2ban-client set sshd banip "$ip" >/dev/null 2>&1
+                    if [ $? -eq 0 ]; then
+                        echo -e "  ${GREEN}✓ 已封鎖: ${ip}${NC}"
+                        BANNED_COUNT=$((BANNED_COUNT + 1))
+                    fi
+                else
+                    echo -e "  ${DIM}已在封鎖中: ${ip}${NC}"
+                fi
+            done
+            
+            if [ "$BANNED_COUNT" -gt 0 ]; then
+                echo -e "${GREEN}✓ 成功封鎖 ${BANNED_COUNT} 個 IP${NC}"
+            fi
+            echo ""
+        else
+            echo -e "${DIM}跳過封鎖${NC}"
+            echo ""
+        fi
+    fi
+else
+    echo -e "${RED}✗ Fail2Ban 未運行${NC}"
     echo ""
 fi
 
@@ -686,89 +754,60 @@ fi
 echo ""
 
 # ==========================================
-# 失敗登入分析
+# 失敗登入分析 (完整顯示)
 # ==========================================
 echo -e "${BOLD}${CYAN}▶ 失敗登入分析${NC}"
 
-if [ -f /var/log/auth.log ]; then
-    LOG_FILE="/var/log/auth.log"
-elif [ -f /var/log/secure ]; then
-    LOG_FILE="/var/log/secure"
+if [ "$FAILED_COUNT" -eq 0 ]; then
+    echo -e "${GREEN}✓ 無失敗登入記錄${NC}"
 else
-    LOG_FILE=""
-fi
-
-if [ -n "$LOG_FILE" ]; then
-    FAILED_COUNT=$(grep "Failed password" "$LOG_FILE" 2>/dev/null | wc -l)
+    echo -e "${DIM}總失敗嘗試: ${WHITE}${FAILED_COUNT}${NC} 次"
     
-    if [ "$FAILED_COUNT" -eq 0 ]; then
-        echo -e "${GREEN}✓ 無失敗登入記錄${NC}"
-    else
-        echo -e "${DIM}總失敗嘗試: ${WHITE}${FAILED_COUNT}${NC} 次"
-        
-        ANALYSIS_TMP=$(mktemp)
-        
-        grep "Failed password" "$LOG_FILE" 2>/dev/null | \
-        awk '{for(i=1;i<=NF;i++){if($i=="from"){print $(i+1)}}}' | \
-        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | \
-        sort | uniq -c | sort -rn > "$ANALYSIS_TMP"
-        
-        CRITICAL_COUNT=0
-        MEDIUM_COUNT=0
-        LOW_COUNT=0
-        NOISE_COUNT=0
+    MEDIUM_COUNT=0
+    LOW_COUNT=0
+    NOISE_COUNT=0
+    
+    while read count ip; do
+        LEVEL=$(get_threat_level "$count")
+        case $LEVEL in
+            MEDIUM) MEDIUM_COUNT=$((MEDIUM_COUNT + 1)) ;;
+            LOW) LOW_COUNT=$((LOW_COUNT + 1)) ;;
+            NOISE) NOISE_COUNT=$((NOISE_COUNT + 1)) ;;
+        esac
+    done < "$ANALYSIS_TMP"
+    
+    echo ""
+    echo -e "${CYAN}威脅統計:${NC}"
+    [ "$CRITICAL_COUNT" -gt 0 ] && echo -e "  ${RED}• 極高風險 (>500次): ${CRITICAL_COUNT} 個 IP${NC}"
+    [ "$MEDIUM_COUNT" -gt 0 ] && echo -e "  ${YELLOW}• 中等風險 (100-500次): ${MEDIUM_COUNT} 個 IP${NC}"
+    [ "$LOW_COUNT" -gt 0 ] && echo -e "  ${GREEN}• 低風險 (20-100次): ${LOW_COUNT} 個 IP${NC}"
+    [ "$NOISE_COUNT" -gt 0 ] && echo -e "  ${GREEN}• 背景噪音 (<20次): ${NOISE_COUNT} 個 IP${NC}"
+    
+    if [ "$CRITICAL_COUNT" -gt 0 ]; then
+        echo ""
+        echo -e "${RED}🔴 極高風險 IP (>500次):${NC}"
         
         while read count ip; do
-            LEVEL=$(get_threat_level "$count")
-            case $LEVEL in
-                CRITICAL) CRITICAL_COUNT=$((CRITICAL_COUNT + 1)) ;;
-                MEDIUM) MEDIUM_COUNT=$((MEDIUM_COUNT + 1)) ;;
-                LOW) LOW_COUNT=$((LOW_COUNT + 1)) ;;
-                NOISE) NOISE_COUNT=$((NOISE_COUNT + 1)) ;;
-            esac
+            if [ "$count" -ge 500 ]; then
+                echo -e "   ${RED}├─ ${ip} (${count} 次)${NC}"
+            fi
         done < "$ANALYSIS_TMP"
-        
+    else
         echo ""
-        echo -e "${CYAN}威脅統計:${NC}"
-        [ "$CRITICAL_COUNT" -gt 0 ] && echo -e "  ${RED}• 極高風險 (>500次): ${CRITICAL_COUNT} 個 IP${NC}"
-        [ "$MEDIUM_COUNT" -gt 0 ] && echo -e "  ${YELLOW}• 中等風險 (100-500次): ${MEDIUM_COUNT} 個 IP${NC}"
-        [ "$LOW_COUNT" -gt 0 ] && echo -e "  ${GREEN}• 低風險 (20-100次): ${LOW_COUNT} 個 IP${NC}"
-        [ "$NOISE_COUNT" -gt 0 ] && echo -e "  ${GREEN}• 背景噪音 (<20次): ${NOISE_COUNT} 個 IP${NC}"
-        
-        if [ "$CRITICAL_COUNT" -gt 0 ]; then
-            echo ""
-            echo -e "${RED}🔴 極高風險 IP (>500次):${NC}"
-            
-            HIGH_RISK_IPS=""
-            while read count ip; do
-                if [ "$count" -ge 500 ]; then
-                    echo -e "   ${RED}├─ ${ip} (${count} 次)${NC}"
-                    HIGH_RISK_IPS="${HIGH_RISK_IPS} ${ip}"
-                    HIGH_RISK_IPS_COUNT=$((HIGH_RISK_IPS_COUNT + 1))
-                fi
-            done < "$ANALYSIS_TMP"
-            
-            add_alert "CRITICAL" "極高風險爆破: ${CRITICAL_COUNT} 個 IP"
-            CRITICAL_THREATS=$((CRITICAL_THREATS + CRITICAL_COUNT))
-        else
-            echo ""
-            echo -e "${GREEN}✓ 無極高風險攻擊${NC}"
-        fi
-        
-        echo ""
-        echo -e "${CYAN}失敗次數 TOP 15:${NC}"
-        echo -e "${DIM}次數    IP 位址              威脅等級${NC}"
-        
-        head -15 "$ANALYSIS_TMP" | while read count ip; do
-            LEVEL=$(get_threat_level "$count")
-            DISPLAY=$(get_threat_display "$LEVEL")
-            printf "${WHITE}%-7d ${CYAN}%-20s ${NC}%b\n" "$count" "$ip" "$DISPLAY"
-        done
-        
-        rm -f "$ANALYSIS_TMP"
+        echo -e "${GREEN}✓ 無極高風險攻擊${NC}"
     fi
-else
-    echo -e "${YELLOW}⚡ 找不到日誌檔案${NC}"
+    
+    echo ""
+    echo -e "${CYAN}失敗次數 TOP 15:${NC}"
+    echo -e "${DIM}次數    IP 位址              威脅等級${NC}"
+    
+    head -15 "$ANALYSIS_TMP" | while read count ip; do
+        LEVEL=$(get_threat_level "$count")
+        DISPLAY=$(get_threat_display "$LEVEL")
+        printf "${WHITE}%-7d ${CYAN}%-20s ${NC}%b\n" "$count" "$ip" "$DISPLAY"
+    done
+    
+    rm -f "$ANALYSIS_TMP"
 fi
 echo ""
 
