@@ -1,11 +1,11 @@
 #!/bin/bash
 
 #################################################
-# VPS 系統資源與安全掃描工具 v6.7.0 - 完整版
+# VPS 系統資源與安全掃描工具 v6.8.0 - 完整版
 # 修正項目:
-#  1. 若無 fail2ban 則自動安裝 (10分鐘/5次/封1小時)
-#  2. 顯示所有 Fail2Ban 監控狀態
-#  3. 自動封鎖極高風險 IP (>500次) 1小時
+#  1. 偵測到無 fail2ban 則直接自動安裝(不詢問)
+#  2. 規則: 10分鐘/5次/封1小時
+#  3. 自動封鎖極高風險 IP (>500次)
 #################################################
 
 # 顏色定義
@@ -19,7 +19,7 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="6.7.0"
+VERSION="6.8.0"
 
 # 掃描範圍
 SCAN_ROOT_BASE=(
@@ -594,7 +594,7 @@ if [ -n "$LOG_FILE" ]; then
 fi
 
 # ==========================================
-# Fail2Ban 安裝與管理
+# Fail2Ban 自動安裝與管理
 # ==========================================
 echo -e "${YELLOW}🛡️  Fail2Ban 防護狀態${NC}"
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
@@ -602,28 +602,34 @@ echo -e "${DIM}─────────────────────�
 # 檢查是否已安裝 Fail2Ban
 if ! command -v fail2ban-client &>/dev/null; then
     echo -e "${YELLOW}⚠ Fail2Ban 未安裝${NC}"
-    echo -ne "${CYAN}是否立即安裝? (y/N): ${NC}"
-    read -t 10 -n 1 INSTALL_CHOICE
+    echo -e "${CYAN}▶ 開始自動安裝 Fail2Ban (10分鐘/5次/封1小時)...${NC}"
     echo ""
     
-    if [[ "$INSTALL_CHOICE" =~ ^[Yy]$ ]]; then
-        echo -ne "${CYAN}正在安裝 Fail2Ban...${NC}"
+    # 直接安裝,不詢問
+    if [ -f /etc/debian_version ]; then
+        echo -ne "${DIM}[1/3] 更新套件清單...${NC}"
+        apt-get update -qq >/dev/null 2>&1 && echo -e " ${GREEN}✓${NC}" || echo -e " ${RED}✗${NC}"
         
-        if [ -f /etc/debian_version ]; then
-            apt-get update -qq >/dev/null 2>&1
-            DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban >/dev/null 2>&1
-        elif [ -f /etc/redhat-release ]; then
-            yum install -y epel-release >/dev/null 2>&1
-            yum install -y fail2ban >/dev/null 2>&1
-        fi
+        echo -ne "${DIM}[2/3] 安裝 Fail2Ban...${NC}"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban >/dev/null 2>&1 && echo -e " ${GREEN}✓${NC}" || echo -e " ${RED}✗${NC}"
+    elif [ -f /etc/redhat-release ]; then
+        echo -ne "${DIM}[1/3] 安裝 EPEL...${NC}"
+        yum install -y epel-release >/dev/null 2>&1 && echo -e " ${GREEN}✓${NC}" || echo -e " ${RED}✗${NC}"
         
-        if command -v fail2ban-client &>/dev/null; then
-            echo -e " ${GREEN}✓ 完成${NC}"
-            
-            # 設定規則: 10分鐘/5次/封1小時
-            CURRENT_IP=$(who am i | awk '{print $5}' | tr -d '()')
-            
-            cat >/etc/fail2ban/jail.local <<EOF
+        echo -ne "${DIM}[2/3] 安裝 Fail2Ban...${NC}"
+        yum install -y fail2ban >/dev/null 2>&1 && echo -e " ${GREEN}✓${NC}" || echo -e " ${RED}✗${NC}"
+    fi
+    
+    if command -v fail2ban-client &>/dev/null; then
+        echo -ne "${DIM}[3/3] 設定規則與啟動服務...${NC}"
+        
+        # 獲取當前 IP 避免自己被鎖
+        CURRENT_IP=$(who am i | awk '{print $5}' | tr -d '()' 2>/dev/null)
+        [ -z "$CURRENT_IP" ] && CURRENT_IP=$(echo $SSH_CLIENT | awk '{print $1}' 2>/dev/null)
+        [ -z "$CURRENT_IP" ] && CURRENT_IP="0.0.0.0/0"
+        
+        # 寫入配置檔
+        cat >/etc/fail2ban/jail.local <<EOF
 [DEFAULT]
 ignoreip = 127.0.0.1/8 ::1 ${CURRENT_IP}
 bantime = 1h
@@ -640,22 +646,29 @@ maxretry = 5
 bantime = 1h
 findtime = 10m
 EOF
-            
-            [ -f /etc/redhat-release ] && sed -i 's|logpath = /var/log/auth.log|logpath = /var/log/secure|' /etc/fail2ban/jail.local
-            
-            systemctl enable fail2ban >/dev/null 2>&1
-            systemctl start fail2ban >/dev/null 2>&1
-            sleep 2
-            
-            echo -e "${GREEN}✓ Fail2Ban 已啟動 (10分鐘/5次/封1小時)${NC}"
+        
+        # 針對 CentOS/RHEL 修正日誌路徑
+        [ -f /etc/redhat-release ] && sed -i 's|logpath = /var/log/auth.log|logpath = /var/log/secure|' /etc/fail2ban/jail.local
+        
+        # 啟動服務
+        systemctl enable fail2ban >/dev/null 2>&1
+        systemctl restart fail2ban >/dev/null 2>&1
+        sleep 3
+        
+        if systemctl is-active --quiet fail2ban; then
+            echo -e " ${GREEN}✓${NC}"
             echo ""
+            echo -e "${GREEN}✓ Fail2Ban 安裝完成!${NC}"
+            echo -e "${DIM}規則: 10分鐘內失敗5次 → 封鎖1小時${NC}"
+            echo -e "${DIM}您的 IP (${CURRENT_IP}) 已加入白名單${NC}"
         else
-            echo -e " ${RED}✗ 安裝失敗${NC}"
+            echo -e " ${RED}✗${NC}"
+            echo -e "${RED}✗ 服務啟動失敗${NC}"
         fi
     else
-        echo -e "${DIM}跳過安裝${NC}"
-        echo ""
+        echo -e "${RED}✗ Fail2Ban 安裝失敗${NC}"
     fi
+    echo ""
 fi
 
 # 顯示 Fail2Ban 狀態
@@ -682,7 +695,7 @@ if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ba
     if [ "$HIGH_RISK_IPS_COUNT" -gt 0 ] && [ -n "$HIGH_RISK_IPS" ]; then
         echo -e "${RED}🚨 發現 ${HIGH_RISK_IPS_COUNT} 個極高風險 IP (>500次失敗登入)${NC}"
         echo -ne "${CYAN}是否立即封鎖 1 小時? (y/N): ${NC}"
-        read -t 10 -n 1 BAN_CHOICE
+        read -t 15 -n 1 BAN_CHOICE
         echo ""
         
         if [[ "$BAN_CHOICE" =~ ^[Yy]$ ]]; then
@@ -707,12 +720,13 @@ if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ba
             fi
             echo ""
         else
-            echo -e "${DIM}跳過封鎖${NC}"
+            echo -e "${DIM}已跳過封鎖${NC}"
             echo ""
         fi
     fi
-else
+elif command -v fail2ban-client &>/dev/null; then
     echo -e "${RED}✗ Fail2Ban 未運行${NC}"
+    echo -e "${YELLOW}請執行: systemctl start fail2ban${NC}"
     echo ""
 fi
 
