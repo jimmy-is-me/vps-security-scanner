@@ -1,12 +1,11 @@
 #!/bin/bash
 
 #################################################
-# VPS 系統資源與安全掃描工具 v6.5.0 - 完整版
+# VPS 系統資源與安全掃描工具 v6.6.0 - 完整版
 # 修正項目:
-#  1. 檢查與顯示進程
-#  2. Fail2Ban: 1小時/10次/封1小時(無白名單,直接覆蓋)
-#  3. 記憶體/Swap/CPU/磁碟/I/O/資料庫/Cron 完整監控
-#  4. 保留所有安全掃描功能(惡意進程/病毒檔名/Webshell/登入監控)
+#  1. 大目錄占用 du -h --max-depth=2 /home
+#  2. Fail2Ban 顯示目前規則與封鎖清單
+#  3. 記憶體 TOP 10 + 按網站統計記憶體占用
 #################################################
 
 # 顏色定義
@@ -20,7 +19,7 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="6.5.0"
+VERSION="6.6.0"
 
 # 掃描範圍
 SCAN_ROOT_BASE=(
@@ -200,7 +199,7 @@ done
 echo ""
 
 # ==========================================
-# 記憶體 RAM 使用監控
+# 記憶體 RAM 使用監控 (TOP 10)
 # ==========================================
 echo -e "${BOLD}${CYAN}▶ 記憶體 RAM 使用${NC}"
 
@@ -246,10 +245,10 @@ echo -e "${DIM}空閒:${NC} ${WHITE}${FREE_MB}${NC} | ${DIM}緩衝:${NC} ${WHITE
 echo -e "${DIM}狀態:${NC} ${RAM_STATUS}"
 
 echo ""
-echo -e "${DIM}記憶體使用 TOP 5:${NC}"
+echo -e "${DIM}記憶體使用 TOP 10:${NC}"
 echo -e "${DIM}用戶       PID      記憶體%  RSS(MB)  指令${NC}"
 
-readarray -t MEM_LINES < <(ps aux --sort=-%mem | head -6 | tail -5)
+readarray -t MEM_LINES < <(ps aux --sort=-%mem | head -11 | tail -10)
 for line in "${MEM_LINES[@]}"; do
     USER=$(echo "$line" | awk '{print $1}' | cut -c1-10)
     PID=$(echo "$line" | awk '{print $2}')
@@ -272,6 +271,48 @@ for line in "${MEM_LINES[@]}"; do
     printf "${YELLOW}%-10s ${DIM}%-8s ${NC}${MEM_COLOR}%7s%% ${DIM}%7s${NC}  %s\n" \
            "$USER" "$PID" "$MEM_P" "${RSS_MB}M" "$CMD"
 done
+echo ""
+
+# ==========================================
+# 按網站統計記憶體占用
+# ==========================================
+echo -e "${DIM}按網站/用戶統計記憶體占用:${NC}"
+
+if [ -d "/home/fly" ]; then
+    declare -A SITE_MEM
+    
+    # 統計每個網站的 PHP-FPM 記憶體
+    while IFS= read -r site_dir; do
+        SITE_NAME=$(basename "$site_dir")
+        MEM_USAGE=$(ps aux | grep "php-fpm.*${SITE_NAME}" | grep -v grep | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
+        
+        if [ -n "$MEM_USAGE" ] && [ "$MEM_USAGE" -gt 0 ]; then
+            SITE_MEM["$SITE_NAME"]=$MEM_USAGE
+        fi
+    done < <(find /home/fly -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+    
+    # 排序顯示 TOP 10
+    if [ ${#SITE_MEM[@]} -gt 0 ]; then
+        for site in "${!SITE_MEM[@]}"; do
+            echo "${SITE_MEM[$site]} $site"
+        done | sort -rn | head -10 | while read mem site; do
+            if [ "$mem" -gt 500 ]; then
+                MEM_COLOR=$RED
+            elif [ "$mem" -gt 200 ]; then
+                MEM_COLOR=$YELLOW
+            else
+                MEM_COLOR=$GREEN
+            fi
+            printf "  ${MEM_COLOR}%-8s${NC} ${WHITE}%s${NC}\n" "${mem}M" "$site"
+        done
+    else
+        echo -e "  ${DIM}無法統計(非 FlyWP 架構)${NC}"
+    fi
+else
+    # 通用統計: 按用戶統計 PHP-FPM
+    echo -e "  ${DIM}按用戶統計:${NC}"
+    ps aux | grep -E "[p]hp-fpm" | awk '{user=$1; mem+=$6} END {for(u in mem) printf "  %-10s %dM\n", u, mem[u]/1024}' | sort -k2 -rn | head -10
+fi
 echo ""
 
 # ==========================================
@@ -348,8 +389,22 @@ echo -e "  ${DIM}總量:${NC} ${WHITE}${DISK_TOTAL}${NC} | ${DIM}使用:${NC} ${
 echo -e "  ${DIM}狀態:${NC} ${DISK_STATUS}"
 
 echo ""
-echo -e "${DIM}大目錄占用 TOP 5:${NC}"
-du -sh /var/www /home /var/log /tmp /var/cache 2>/dev/null | sort -rh | head -5 | while read size dir; do
+echo -e "${DIM}大目錄占用分析 (depth=2):${NC}"
+
+if [ -d "/home" ]; then
+    du -h --max-depth=2 /home 2>/dev/null | sort -rh | head -15 | while read size dir; do
+        # 過濾掉總計行
+        if [[ ! "$dir" =~ ^/home$ ]]; then
+            echo -e "  ${WHITE}${size}${NC} ${DIM}${dir}${NC}"
+        fi
+    done
+else
+    echo -e "  ${DIM}/home 目錄不存在${NC}"
+fi
+
+echo ""
+echo -e "${DIM}其他重要目錄:${NC}"
+du -sh /var/www /var/log /tmp /var/cache 2>/dev/null | sort -rh | while read size dir; do
     echo -e "  ${WHITE}${size}${NC} ${DIM}${dir}${NC}"
 done
 echo ""
@@ -501,7 +556,7 @@ fi
 echo ""
 
 # ==========================================
-# Fail2Ban 規則管理(直接覆蓋,無白名單)
+# Fail2Ban 規則管理 (顯示目前規則與封鎖清單)
 # ==========================================
 if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ban; then
     echo -e "${YELLOW}🛡️  Fail2Ban 防護狀態${NC}"
@@ -512,9 +567,31 @@ if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ba
     CURRENT_BANTIME=$(fail2ban-client get sshd bantime 2>/dev/null || echo "3600")
     
     echo -e "${BOLD}${CYAN}▶ 目前規則:${NC}"
-    echo -e "${DIM}失敗次數: ${WHITE}${CURRENT_MAXRETRY}${NC} 次"
-    echo -e "${DIM}時間窗口: ${WHITE}${CURRENT_FINDTIME}${NC} 秒"
-    echo -e "${DIM}封鎖時間: ${WHITE}${CURRENT_BANTIME}${NC} 秒"
+    echo -e "${DIM}失敗次數: ${WHITE}${CURRENT_MAXRETRY}${NC} 次 ${DIM}(建議: 10)${NC}"
+    echo -e "${DIM}時間窗口: ${WHITE}${CURRENT_FINDTIME}${NC} 秒 ${DIM}(建議: 3600)${NC}"
+    echo -e "${DIM}封鎖時間: ${WHITE}${CURRENT_BANTIME}${NC} 秒 ${DIM}(建議: 3600)${NC}"
+    echo ""
+    
+    # 顯示目前封鎖清單
+    BANNED_NOW=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
+    TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $NF}')
+    
+    echo -e "${BOLD}${CYAN}▶ 封鎖統計:${NC}"
+    echo -e "${DIM}當前封鎖: ${WHITE}${BANNED_NOW:-0}${NC} 個 IP"
+    echo -e "${DIM}累計封鎖: ${WHITE}${TOTAL_BANNED:-0}${NC} 次"
+    
+    # 顯示被封鎖的 IP 清單
+    if [ "${BANNED_NOW:-0}" -gt 0 ]; then
+        echo ""
+        echo -e "${DIM}目前被封鎖的 IP:${NC}"
+        BANNED_IPS=$(fail2ban-client status sshd 2>/dev/null | grep "Banned IP list:" | sed 's/.*Banned IP list://')
+        
+        if [ -n "$BANNED_IPS" ]; then
+            for ip in $BANNED_IPS; do
+                echo -e "  ${RED}├─ ${ip}${NC}"
+            done
+        fi
+    fi
     echo ""
     
     NEED_UPDATE=0
@@ -568,14 +645,6 @@ EOF
     else
         echo -e "${GREEN}✓ 規則已是最佳配置${NC}"
     fi
-    echo ""
-    
-    BANNED_NOW=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
-    TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $NF}')
-    
-    echo -e "${BOLD}${CYAN}▶ 封鎖統計:${NC}"
-    echo -e "${DIM}當前封鎖: ${WHITE}${BANNED_NOW:-0}${NC} 個 IP"
-    echo -e "${DIM}累計封鎖: ${WHITE}${TOTAL_BANNED:-0}${NC} 次"
     echo ""
 fi
 
