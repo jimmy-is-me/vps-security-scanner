@@ -1,11 +1,12 @@
 #!/bin/bash
 
 #################################################
-# VPS 系統資源與安全掃描工具 v6.0.0
+# VPS 系統資源與安全掃描工具 v6.5.0 - 完整版
 # 修正項目:
-#  1. 移除白名單 IP 功能
-#  2. Fail2Ban 直接覆蓋設定(不備份)
-#  3. 強化系統資源監控(CPU/RAM/Swap/磁碟/I/O/資料庫/Cron)
+#  1. 檢查與顯示進程
+#  2. Fail2Ban: 1小時/10次/封1小時(無白名單,直接覆蓋)
+#  3. 記憶體/Swap/CPU/磁碟/I/O/資料庫/Cron 完整監控
+#  4. 保留所有安全掃描功能(惡意進程/病毒檔名/Webshell/登入監控)
 #################################################
 
 # 顏色定義
@@ -19,7 +20,7 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="6.0.0"
+VERSION="6.5.0"
 
 # 掃描範圍
 SCAN_ROOT_BASE=(
@@ -141,7 +142,9 @@ echo -e "${DIM}核心版本:${NC} ${WHITE}${KERNEL}${NC}"
 echo -e "${DIM}CPU 型號:${NC} ${WHITE}${CPU_MODEL}${NC}"
 echo -e "${DIM}CPU 核心:${NC} ${WHITE}${CPU_CORES} 核心${NC}"
 UPTIME_HUMAN=$(uptime -p 2>/dev/null || uptime | awk '{print $3,$4}')
+SCAN_TIME=$(date '+%Y-%m-%d %H:%M:%S')
 echo -e "${DIM}運行時間:${NC} ${WHITE}${UPTIME_HUMAN}${NC}"
+echo -e "${DIM}掃描時間:${NC} ${WHITE}${SCAN_TIME}${NC}"
 echo ""
 
 # ==========================================
@@ -149,7 +152,6 @@ echo ""
 # ==========================================
 echo -e "${BOLD}${CYAN}▶ CPU 使用率${NC}"
 
-# 系統負載
 LOAD_1=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{gsub(/ /,""); print $1}')
 LOAD_5=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{gsub(/ /,""); print $2}')
 LOAD_15=$(uptime | awk -F'load average:' '{print $2}' | awk -F',' '{gsub(/ /,""); print $3}')
@@ -168,9 +170,8 @@ else
 fi
 
 echo -e "${DIM}系統負載:${NC} ${WHITE}${LOAD_1}${NC} ${DIM}(1分) ${WHITE}${LOAD_5}${NC} ${DIM}(5分) ${WHITE}${LOAD_15}${NC} ${DIM}(15分)${NC}"
-echo -e "${DIM}負載狀態:${NC} ${LOAD_STATUS} ${DIM}(每核心負載: ${LOAD_RATIO})${NC}"
+echo -e "${DIM}負載狀態:${NC} ${LOAD_STATUS} ${DIM}(每核心: ${LOAD_RATIO})${NC}"
 
-# CPU 使用率 TOP 5
 echo ""
 echo -e "${DIM}CPU 使用率 TOP 5:${NC}"
 echo -e "${DIM}用戶       PID      CPU%   記憶體%  指令${NC}"
@@ -186,7 +187,7 @@ for line in "${CPU_LINES[@]}"; do
     CPU_INT=${CPU_P%.*}
     if [ "${CPU_INT:-0}" -gt 50 ]; then
         CPU_COLOR=$RED
-        add_alert "HIGH" "進程 ${CMD} CPU 使用過高: ${CPU_P}%"
+        add_alert "HIGH" "進程 ${CMD} CPU 過高: ${CPU_P}%"
     elif [ "${CPU_INT:-0}" -gt 20 ]; then
         CPU_COLOR=$YELLOW
     else
@@ -227,11 +228,11 @@ RAM_INT=${RAM_PERCENT%.*}
 if [ "${RAM_INT:-0}" -ge 90 ]; then
     RAM_COLOR=$RED
     RAM_STATUS="${RED}嚴重不足${NC}"
-    add_alert "CRITICAL" "記憶體使用率嚴重: ${RAM_PERCENT}%"
+    add_alert "CRITICAL" "記憶體嚴重不足: ${RAM_PERCENT}%"
 elif [ "${RAM_INT:-0}" -ge 80 ]; then
     RAM_COLOR=$RED
     RAM_STATUS="${RED}偏高${NC}"
-    add_alert "HIGH" "記憶體使用率過高: ${RAM_PERCENT}%"
+    add_alert "HIGH" "記憶體使用過高: ${RAM_PERCENT}%"
 elif [ "${RAM_INT:-0}" -ge 60 ]; then
     RAM_COLOR=$YELLOW
     RAM_STATUS="${YELLOW}中等${NC}"
@@ -244,7 +245,6 @@ echo -e "${DIM}總量:${NC} ${WHITE}${TOTAL_GB}${NC} | ${DIM}使用:${NC} ${RAM_
 echo -e "${DIM}空閒:${NC} ${WHITE}${FREE_MB}${NC} | ${DIM}緩衝:${NC} ${WHITE}${BUFFERS_MB}${NC} | ${DIM}快取:${NC} ${WHITE}${CACHED_MB}${NC}"
 echo -e "${DIM}狀態:${NC} ${RAM_STATUS}"
 
-# 記憶體使用 TOP 5
 echo ""
 echo -e "${DIM}記憶體使用 TOP 5:${NC}"
 echo -e "${DIM}用戶       PID      記憶體%  RSS(MB)  指令${NC}"
@@ -262,7 +262,7 @@ for line in "${MEM_LINES[@]}"; do
     MEM_INT=${MEM_P%.*}
     if [ "${MEM_INT:-0}" -gt 20 ]; then
         MEM_COLOR=$RED
-        add_alert "MEDIUM" "進程 ${CMD} 記憶體使用過高: ${MEM_P}%"
+        add_alert "MEDIUM" "進程 ${CMD} 記憶體過高: ${MEM_P}%"
     elif [ "${MEM_INT:-0}" -gt 10 ]; then
         MEM_COLOR=$YELLOW
     else
@@ -287,7 +287,7 @@ SWAP_USED_KB=$((SWAP_TOTAL_KB - SWAP_FREE_KB))
 
 if [ "$SWAP_TOTAL_KB" -eq 0 ]; then
     echo -e "${YELLOW}⚠ 系統未配置 Swap${NC}"
-    echo -e "${DIM}建議: 為低記憶體 VPS 配置適量 Swap (建議 1-2G)${NC}"
+    echo -e "${DIM}建議: 低記憶體 VPS 配置 1-2G Swap${NC}"
 else
     SWAP_TOTAL_GB=$(kb_to_gb "$SWAP_TOTAL_KB")
     SWAP_USED_MB=$(kb_to_mb "$SWAP_USED_KB")
@@ -299,11 +299,10 @@ else
     if [ "${SWAP_INT:-0}" -ge 80 ]; then
         SWAP_COLOR=$RED
         SWAP_STATUS="${RED}過度使用${NC}"
-        add_alert "HIGH" "Swap 使用率過高: ${SWAP_PERCENT}% (可能導致系統變慢)"
+        add_alert "HIGH" "Swap 過度使用: ${SWAP_PERCENT}% (系統可能變慢)"
     elif [ "${SWAP_INT:-0}" -ge 50 ]; then
         SWAP_COLOR=$YELLOW
         SWAP_STATUS="${YELLOW}使用中${NC}"
-        add_alert "MEDIUM" "Swap 使用率偏高: ${SWAP_PERCENT}%"
     else
         SWAP_COLOR=$GREEN
         SWAP_STATUS="${GREEN}正常${NC}"
@@ -313,10 +312,7 @@ else
     echo -e "${DIM}狀態:${NC} ${SWAP_STATUS}"
     
     if [ "${SWAP_INT:-0}" -ge 50 ]; then
-        echo -e "${YELLOW}⚠ Swap 使用過多可能導致效能下降,建議:${NC}"
-        echo -e "${DIM}  • 增加實體記憶體${NC}"
-        echo -e "${DIM}  • 優化 PHP-FPM / MySQL 配置${NC}"
-        echo -e "${DIM}  • 關閉不必要的服務${NC}"
+        echo -e "${YELLOW}⚠ 建議: 增加 RAM 或優化 PHP-FPM/MySQL 配置${NC}"
     fi
 fi
 echo ""
@@ -338,7 +334,7 @@ if [ "$DISK_PERCENT" -ge 90 ]; then
 elif [ "$DISK_PERCENT" -ge 80 ]; then
     DISK_COLOR=$RED
     DISK_STATUS="${RED}偏高${NC}"
-    add_alert "HIGH" "硬碟使用率過高: ${DISK_PERCENT}%"
+    add_alert "HIGH" "硬碟使用過高: ${DISK_PERCENT}%"
 elif [ "$DISK_PERCENT" -ge 60 ]; then
     DISK_COLOR=$YELLOW
     DISK_STATUS="${YELLOW}中等${NC}"
@@ -351,16 +347,11 @@ echo -e "${DIM}根目錄 (/):${NC}"
 echo -e "  ${DIM}總量:${NC} ${WHITE}${DISK_TOTAL}${NC} | ${DIM}使用:${NC} ${DISK_COLOR}${DISK_USED} (${DISK_PERCENT}%)${NC} | ${DIM}可用:${NC} ${GREEN}${DISK_AVAIL}${NC}"
 echo -e "  ${DIM}狀態:${NC} ${DISK_STATUS}"
 
-# 大目錄檢查
 echo ""
 echo -e "${DIM}大目錄占用 TOP 5:${NC}"
-if [ -d /var/www ] || [ -d /home ]; then
-    du -sh /var/www /home /var/log /tmp /var/cache 2>/dev/null | sort -rh | head -5 | while read size dir; do
-        echo -e "  ${WHITE}${size}${NC} ${DIM}${dir}${NC}"
-    done
-else
-    echo -e "  ${DIM}無法檢測${NC}"
-fi
+du -sh /var/www /home /var/log /tmp /var/cache 2>/dev/null | sort -rh | head -5 | while read size dir; do
+    echo -e "  ${WHITE}${size}${NC} ${DIM}${dir}${NC}"
+done
 echo ""
 
 # ==========================================
@@ -374,7 +365,7 @@ if command -v iostat &>/dev/null; then
     
     if [ "${DISK_UTIL_INT:-0}" -gt 80 ]; then
         IO_STATUS="${RED}瓶頸${NC}"
-        add_alert "HIGH" "磁碟 I/O 使用率過高: ${DISK_UTIL}%"
+        add_alert "HIGH" "磁碟 I/O 過高: ${DISK_UTIL}%"
     elif [ "${DISK_UTIL_INT:-0}" -gt 50 ]; then
         IO_STATUS="${YELLOW}偏高${NC}"
     else
@@ -383,8 +374,7 @@ if command -v iostat &>/dev/null; then
     
     echo -e "${DIM}平均使用率:${NC} ${WHITE}${DISK_UTIL}%${NC} - ${IO_STATUS}"
 else
-    echo -e "${YELLOW}⚠ 未安裝 iostat 工具${NC}"
-    echo -e "${DIM}安裝: apt install sysstat / yum install sysstat${NC}"
+    echo -e "${YELLOW}⚠ 未安裝 iostat${NC} ${DIM}(apt install sysstat)${NC}"
 fi
 echo ""
 
@@ -395,7 +385,6 @@ echo -e "${BOLD}${CYAN}▶ 資料庫服務檢查${NC}"
 
 DB_FOUND=0
 
-# MySQL/MariaDB 檢查
 if pgrep -x "mysqld\|mariadbd" >/dev/null 2>&1; then
     PROC_NAME=$(pgrep -x mysqld >/dev/null && echo "mysqld" || echo "mariadbd")
     CPU=$(ps aux | grep -E "[$PROC_NAME]" | awk '{sum+=$3} END {printf "%.1f", sum}')
@@ -405,7 +394,6 @@ if pgrep -x "mysqld\|mariadbd" >/dev/null 2>&1; then
     echo -e "${GREEN}✓ MySQL/MariaDB 運行中${NC}"
     echo -e "  ${DIM}CPU: ${WHITE}${CPU}%${DIM} | 記憶體: ${WHITE}${MEM}% (${RSS}M)${NC}"
     
-    # 檢查連線數
     if command -v mysql &>/dev/null; then
         MAX_CONN=$(mysql -e "SHOW VARIABLES LIKE 'max_connections';" 2>/dev/null | awk 'NR==2 {print $2}')
         CURRENT_CONN=$(mysql -e "SHOW STATUS LIKE 'Threads_connected';" 2>/dev/null | awk 'NR==2 {print $2}')
@@ -415,7 +403,7 @@ if pgrep -x "mysqld\|mariadbd" >/dev/null 2>&1; then
             
             if [ "$CONN_PERCENT" -ge 80 ]; then
                 CONN_STATUS="${RED}接近上限${NC}"
-                add_alert "HIGH" "MySQL 連線數接近上限: ${CURRENT_CONN}/${MAX_CONN}"
+                add_alert "HIGH" "MySQL 連線接近上限: ${CURRENT_CONN}/${MAX_CONN}"
             elif [ "$CONN_PERCENT" -ge 60 ]; then
                 CONN_STATUS="${YELLOW}偏高${NC}"
             else
@@ -429,19 +417,6 @@ if pgrep -x "mysqld\|mariadbd" >/dev/null 2>&1; then
     DB_FOUND=1
 fi
 
-# PostgreSQL 檢查
-if pgrep -x "postgres" >/dev/null 2>&1; then
-    CPU=$(ps aux | grep -E "[p]ostgres" | awk '{sum+=$3} END {printf "%.1f", sum}')
-    MEM=$(ps aux | grep -E "[p]ostgres" | awk '{sum+=$4} END {printf "%.1f", sum}')
-    RSS=$(ps aux | grep -E "[p]ostgres" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
-
-    echo -e "${GREEN}✓ PostgreSQL 運行中${NC}"
-    echo -e "  ${DIM}CPU: ${WHITE}${CPU}%${DIM} | 記憶體: ${WHITE}${MEM}% (${RSS}M)${NC}"
-    
-    DB_FOUND=1
-fi
-
-# Redis 檢查
 if pgrep -x "redis-server" >/dev/null 2>&1; then
     CPU=$(ps aux | grep -E "[r]edis-server" | awk '{sum+=$3} END {printf "%.1f", sum}')
     MEM=$(ps aux | grep -E "[r]edis-server" | awk '{sum+=$4} END {printf "%.1f", sum}')
@@ -463,23 +438,20 @@ echo -e "${BOLD}${CYAN}▶ 定時任務 Cron 檢查${NC}"
 
 CRON_FOUND=0
 
-# 檢查 root crontab
 if crontab -l 2>/dev/null | grep -v "^#" | grep -v "^$" >/dev/null; then
     ROOT_CRON_COUNT=$(crontab -l 2>/dev/null | grep -v "^#" | grep -v "^$" | wc -l)
     echo -e "${GREEN}✓ Root 定時任務: ${WHITE}${ROOT_CRON_COUNT}${NC} 個"
     
-    # 顯示高頻率任務
     HIGH_FREQ=$(crontab -l 2>/dev/null | grep -E "^\*.*\*.*\*.*\*.*\*" | wc -l)
     if [ "$HIGH_FREQ" -gt 0 ]; then
         echo -e "  ${YELLOW}⚠ 高頻率任務 (每分鐘): ${HIGH_FREQ} 個${NC}"
-        add_alert "MEDIUM" "發現 ${HIGH_FREQ} 個高頻率 Cron 任務"
+        add_alert "MEDIUM" "發現 ${HIGH_FREQ} 個高頻率 Cron"
     fi
     
-    # 檢查可疑腳本
     SUSPICIOUS_CRON=$(crontab -l 2>/dev/null | grep -iE "(curl|wget|/tmp/|/dev/shm/)" | grep -v "^#" | wc -l)
     if [ "$SUSPICIOUS_CRON" -gt 0 ]; then
         echo -e "  ${RED}⚠ 可疑任務: ${SUSPICIOUS_CRON} 個${NC}"
-        add_alert "HIGH" "發現 ${SUSPICIOUS_CRON} 個可疑 Cron 任務"
+        add_alert "HIGH" "發現 ${SUSPICIOUS_CRON} 個可疑 Cron"
         crontab -l 2>/dev/null | grep -iE "(curl|wget|/tmp/|/dev/shm/)" | grep -v "^#" | head -3 | while read line; do
             echo -e "    ${RED}${line:0:60}...${NC}"
         done
@@ -488,8 +460,7 @@ if crontab -l 2>/dev/null | grep -v "^#" | grep -v "^$" >/dev/null; then
     CRON_FOUND=1
 fi
 
-# 檢查系統 cron 目錄
-SYSTEM_CRON_FILES=$(find /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly -type f 2>/dev/null | wc -l)
+SYSTEM_CRON_FILES=$(find /etc/cron.d /etc/cron.daily /etc/cron.hourly -type f 2>/dev/null | wc -l)
 if [ "$SYSTEM_CRON_FILES" -gt 0 ]; then
     echo -e "${GREEN}✓ 系統定時任務: ${WHITE}${SYSTEM_CRON_FILES}${NC} 個檔案"
     CRON_FOUND=1
@@ -499,13 +470,43 @@ fi
 echo ""
 
 # ==========================================
-# Fail2Ban 規則管理(直接覆蓋)
+# 網站服務
+# ==========================================
+echo -e "${BOLD}${CYAN}▶ 網站服務資源使用${NC}"
+WEB_SERVICES=0
+
+if pgrep -x nginx >/dev/null 2>&1; then
+    PROCS=$(pgrep -x nginx | wc -l)
+    CPU=$(ps aux | grep -E "[n]ginx" | awk '{sum+=$3} END {printf "%.1f", sum}')
+    MEM=$(ps aux | grep -E "[n]ginx" | awk '{sum+=$4} END {printf "%.1f", sum}')
+    RSS=$(ps aux | grep -E "[n]ginx" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
+
+    echo -e "${GREEN}✓ Nginx${NC}"
+    echo -e "   ${DIM}進程: ${WHITE}${PROCS}${DIM} | CPU: ${WHITE}${CPU}%${DIM} | 記憶體: ${WHITE}${MEM}% (${RSS}M)${NC}"
+    WEB_SERVICES=1
+fi
+
+if pgrep -f "php-fpm" >/dev/null 2>&1; then
+    PROCS=$(pgrep -f "php-fpm" | wc -l)
+    CPU=$(ps aux | grep -E "[p]hp-fpm" | awk '{sum+=$3} END {printf "%.1f", sum}')
+    MEM=$(ps aux | grep -E "[p]hp-fpm" | awk '{sum+=$4} END {printf "%.1f", sum}')
+    RSS=$(ps aux | grep -E "[p]hp-fpm" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
+
+    echo -e "${GREEN}✓ PHP-FPM${NC}"
+    echo -e "   ${DIM}進程: ${WHITE}${PROCS}${DIM} | CPU: ${WHITE}${CPU}%${DIM} | 記憶體: ${WHITE}${MEM}% (${RSS}M)${NC}"
+    WEB_SERVICES=1
+fi
+
+[ "$WEB_SERVICES" -eq 0 ] && echo -e "${DIM}未偵測到網站服務${NC}"
+echo ""
+
+# ==========================================
+# Fail2Ban 規則管理(直接覆蓋,無白名單)
 # ==========================================
 if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ban; then
     echo -e "${YELLOW}🛡️  Fail2Ban 防護狀態${NC}"
     echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
     
-    # 獲取當前規則
     CURRENT_MAXRETRY=$(fail2ban-client get sshd maxretry 2>/dev/null || echo "5")
     CURRENT_FINDTIME=$(fail2ban-client get sshd findtime 2>/dev/null || echo "600")
     CURRENT_BANTIME=$(fail2ban-client get sshd bantime 2>/dev/null || echo "3600")
@@ -516,14 +517,13 @@ if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ba
     echo -e "${DIM}封鎖時間: ${WHITE}${CURRENT_BANTIME}${NC} 秒"
     echo ""
     
-    # 檢查是否需要更新規則
     NEED_UPDATE=0
     if [ "$CURRENT_MAXRETRY" -ne 10 ] || [ "$CURRENT_FINDTIME" -ne 3600 ] || [ "$CURRENT_BANTIME" -ne 3600 ]; then
         NEED_UPDATE=1
     fi
     
     if [ "$NEED_UPDATE" -eq 1 ]; then
-        echo -e "${YELLOW}⚠ 建議更新規則為: 1小時內 10 次失敗 = 封鎖 1 小時${NC}"
+        echo -e "${YELLOW}⚠ 建議更新規則: 1小時/10次/封1小時${NC}"
         echo -ne "${CYAN}是否立即更新? (y/N): ${NC}"
         read -t 10 -n 1 UPDATE_CHOICE
         echo ""
@@ -531,10 +531,9 @@ if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ba
         if [[ "$UPDATE_CHOICE" =~ ^[Yy]$ ]]; then
             echo -ne "${CYAN}正在更新 Fail2Ban 規則...${NC}"
             
-            # 獲取當前登入 IP
             CURRENT_IP=$(who am i | awk '{print $5}' | tr -d '()')
             
-            # 直接覆蓋配置(不備份)
+            # 直接覆蓋(不備份,無白名單)
             cat >/etc/fail2ban/jail.local <<EOF
 [DEFAULT]
 ignoreip = 127.0.0.1/8 ::1 ${CURRENT_IP}
@@ -571,7 +570,6 @@ EOF
     fi
     echo ""
     
-    # 封鎖統計
     BANNED_NOW=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
     TOTAL_BANNED=$(fail2ban-client status sshd 2>/dev/null | grep "Total banned" | awk '{print $NF}')
     
@@ -582,62 +580,318 @@ EOF
 fi
 
 # ==========================================
-# 威脅掃描(精簡版)
+# 登入監控
 # ==========================================
-echo -e "${YELLOW}🔍 安全威脅掃描${NC}"
+echo -e "${YELLOW}👤 系統登入監控${NC}"
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
 
-# 惡意進程
-MALICIOUS_PROCESSES=$(ps aux | awk 'length($11) == 8 && $11 ~ /^[a-z0-9]+$/ && $11 !~ /lsphp|systemd|docker|mysql|redis/' | grep -v "USER" | wc -l)
+CURRENT_USERS=$(who | wc -l)
+echo -e "${BOLD}${CYAN}▶ 目前登入用戶: ${WHITE}${CURRENT_USERS} 人${NC}"
+
+if [ "$CURRENT_USERS" -gt 0 ]; then
+    echo ""
+    while read line; do
+        USER=$(echo "$line" | awk '{print $1}')
+        TTY=$(echo "$line" | awk '{print $2}')
+        LOGIN_TIME=$(echo "$line" | awk '{print $3, $4}')
+        IP=$(echo "$line" | awk '{print $5}' | tr -d '()')
+
+        if [ -n "$IP" ] && [ "$IP" != "127.0.0.1" ]; then
+            echo -e "${YELLOW}⚠${NC} ${USER} @ ${TTY} | ${CYAN}${IP}${NC} | ${LOGIN_TIME}"
+        else
+            echo -e "${GREEN}✓${NC} ${USER} @ ${TTY} | ${DIM}本機${NC} | ${LOGIN_TIME}"
+        fi
+    done < <(who)
+fi
+
+echo ""
+echo -e "${BOLD}${CYAN}▶ 最近 10 次成功登入${NC}"
+RECENT_LOGINS=$(last -10 -F 2>/dev/null | grep -v "^$" | grep -v "^wtmp" | grep -v "^reboot")
+if [ -n "$RECENT_LOGINS" ]; then
+    echo "$RECENT_LOGINS" | head -10 | while read line; do
+        echo -e "${DIM}${line}${NC}"
+    done
+else
+    echo -e "${DIM}無最近登入記錄${NC}"
+fi
+echo ""
+
+# ==========================================
+# 失敗登入分析
+# ==========================================
+echo -e "${BOLD}${CYAN}▶ 失敗登入分析${NC}"
+
+if [ -f /var/log/auth.log ]; then
+    LOG_FILE="/var/log/auth.log"
+elif [ -f /var/log/secure ]; then
+    LOG_FILE="/var/log/secure"
+else
+    LOG_FILE=""
+fi
+
+if [ -n "$LOG_FILE" ]; then
+    FAILED_COUNT=$(grep "Failed password" "$LOG_FILE" 2>/dev/null | wc -l)
+    
+    if [ "$FAILED_COUNT" -eq 0 ]; then
+        echo -e "${GREEN}✓ 無失敗登入記錄${NC}"
+    else
+        echo -e "${DIM}總失敗嘗試: ${WHITE}${FAILED_COUNT}${NC} 次"
+        
+        ANALYSIS_TMP=$(mktemp)
+        
+        grep "Failed password" "$LOG_FILE" 2>/dev/null | \
+        awk '{for(i=1;i<=NF;i++){if($i=="from"){print $(i+1)}}}' | \
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | \
+        sort | uniq -c | sort -rn > "$ANALYSIS_TMP"
+        
+        CRITICAL_COUNT=0
+        MEDIUM_COUNT=0
+        LOW_COUNT=0
+        NOISE_COUNT=0
+        
+        while read count ip; do
+            LEVEL=$(get_threat_level "$count")
+            case $LEVEL in
+                CRITICAL) CRITICAL_COUNT=$((CRITICAL_COUNT + 1)) ;;
+                MEDIUM) MEDIUM_COUNT=$((MEDIUM_COUNT + 1)) ;;
+                LOW) LOW_COUNT=$((LOW_COUNT + 1)) ;;
+                NOISE) NOISE_COUNT=$((NOISE_COUNT + 1)) ;;
+            esac
+        done < "$ANALYSIS_TMP"
+        
+        echo ""
+        echo -e "${CYAN}威脅統計:${NC}"
+        [ "$CRITICAL_COUNT" -gt 0 ] && echo -e "  ${RED}• 極高風險 (>500次): ${CRITICAL_COUNT} 個 IP${NC}"
+        [ "$MEDIUM_COUNT" -gt 0 ] && echo -e "  ${YELLOW}• 中等風險 (100-500次): ${MEDIUM_COUNT} 個 IP${NC}"
+        [ "$LOW_COUNT" -gt 0 ] && echo -e "  ${GREEN}• 低風險 (20-100次): ${LOW_COUNT} 個 IP${NC}"
+        [ "$NOISE_COUNT" -gt 0 ] && echo -e "  ${GREEN}• 背景噪音 (<20次): ${NOISE_COUNT} 個 IP${NC}"
+        
+        if [ "$CRITICAL_COUNT" -gt 0 ]; then
+            echo ""
+            echo -e "${RED}🔴 極高風險 IP (>500次):${NC}"
+            
+            HIGH_RISK_IPS=""
+            while read count ip; do
+                if [ "$count" -ge 500 ]; then
+                    echo -e "   ${RED}├─ ${ip} (${count} 次)${NC}"
+                    HIGH_RISK_IPS="${HIGH_RISK_IPS} ${ip}"
+                    HIGH_RISK_IPS_COUNT=$((HIGH_RISK_IPS_COUNT + 1))
+                fi
+            done < "$ANALYSIS_TMP"
+            
+            add_alert "CRITICAL" "極高風險爆破: ${CRITICAL_COUNT} 個 IP"
+            CRITICAL_THREATS=$((CRITICAL_THREATS + CRITICAL_COUNT))
+        else
+            echo ""
+            echo -e "${GREEN}✓ 無極高風險攻擊${NC}"
+        fi
+        
+        echo ""
+        echo -e "${CYAN}失敗次數 TOP 15:${NC}"
+        echo -e "${DIM}次數    IP 位址              威脅等級${NC}"
+        
+        head -15 "$ANALYSIS_TMP" | while read count ip; do
+            LEVEL=$(get_threat_level "$count")
+            DISPLAY=$(get_threat_display "$LEVEL")
+            printf "${WHITE}%-7d ${CYAN}%-20s ${NC}%b\n" "$count" "$ip" "$DISPLAY"
+        done
+        
+        rm -f "$ANALYSIS_TMP"
+    fi
+else
+    echo -e "${YELLOW}⚡ 找不到日誌檔案${NC}"
+fi
+echo ""
+
+# ==========================================
+# 惡意 Process 掃描
+# ==========================================
+echo -e "${YELLOW}[1/4] 🔍 惡意 Process 掃描${NC}"
+echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
+
+MALICIOUS_PROCESSES=$(ps aux | awk 'length($11) == 8 && $11 ~ /^[a-z0-9]+$/ && $11 !~ /lsphp|systemd|docker|mysql|redis|lighttpd|postgres|memcache/' | grep -v "USER" | wc -l)
 CRYPTO_MINERS=$(ps aux | grep -iE "xmrig|minerd|cpuminer|ccminer|cryptonight|monero|kinsing" | grep -v grep | wc -l)
 TOTAL_SUSPICIOUS=$((MALICIOUS_PROCESSES + CRYPTO_MINERS))
 
 if [ "$TOTAL_SUSPICIOUS" -gt 0 ]; then
-    echo -e "${RED}⚠ 發現 ${TOTAL_SUSPICIOUS} 個可疑進程${NC}"
+    echo -e "${RED}⚠ 發現 ${TOTAL_SUSPICIOUS} 個可疑 process${NC}"
+    echo ""
+
+    if [ "$MALICIOUS_PROCESSES" -gt 0 ]; then
+        echo -e "${RED}├─ 亂碼名稱: ${MALICIOUS_PROCESSES} 個${NC}"
+        ps aux | awk 'length($11) == 8 && $11 ~ /^[a-z0-9]+$/' | grep -v "USER" | head -3 | while read line; do
+            PROC=$(echo "$line" | awk '{print $11}')
+            PID=$(echo "$line" | awk '{print $2}')
+            CPU_P=$(echo "$line" | awk '{print $3}')
+            echo -e "${RED}│  • ${PROC} ${DIM}(PID: ${PID}, CPU: ${CPU_P}%)${NC}"
+        done
+    fi
+
+    if [ "$CRYPTO_MINERS" -gt 0 ]; then
+        echo -e "${RED}├─ 挖礦程式: ${CRYPTO_MINERS} 個${NC}"
+        ps aux | grep -iE "xmrig|minerd|cpuminer" | grep -v grep | head -3 | while read line; do
+            PROC=$(echo "$line" | awk '{print $11}')
+            PID=$(echo "$line" | awk '{print $2}')
+            CPU_P=$(echo "$line" | awk '{print $3}')
+            echo -e "${RED}│  • ${PROC} ${DIM}(PID: ${PID}, CPU: ${CPU_P}%)${NC}"
+        done
+        add_alert "CRITICAL" "挖礦程式: ${CRYPTO_MINERS} 個"
+        CRITICAL_THREATS=$((CRITICAL_THREATS + CRYPTO_MINERS))
+    fi
+
     THREATS_FOUND=$((THREATS_FOUND + TOTAL_SUSPICIOUS))
-    add_alert "CRITICAL" "發現可疑進程: ${TOTAL_SUSPICIOUS} 個"
+
+    echo ""
+    echo -ne "${YELLOW}🧹 自動清除中...${NC}"
+    ps aux | awk 'length($11) == 8 && $11 ~ /^[a-z0-9]+$/' | grep -v "USER" | awk '{print $2}' | xargs kill -9 2>/dev/null
+    ps aux | grep -iE "xmrig|minerd|cpuminer" | grep -v grep | awk '{print $2}' | xargs kill -9 2>/dev/null
+    THREATS_CLEANED=$((THREATS_CLEANED + TOTAL_SUSPICIOUS))
+    echo -e " ${GREEN}✓ 完成${NC}"
 else
-    echo -e "${GREEN}✓ 未發現可疑進程${NC}"
+    echo -e "${GREEN}✓ 未發現可疑 process${NC}"
+fi
+echo ""
+
+# ==========================================
+# 病毒檔名掃描
+# ==========================================
+echo -e "${YELLOW}[2/4] 🦠 病毒檔名掃描${NC}"
+echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
+
+MALWARE_TMPFILE=$(mktemp)
+
+if [ -n "$SCAN_PATHS" ]; then
+    find $SCAN_PATHS -type f \( \
+        -iname "*c99*.php" -o \
+        -iname "*r57*.php" -o \
+        -iname "*wso*.php" -o \
+        -iname "*shell*.php" -o \
+        -iname "*backdoor*.php" -o \
+        -iname "*webshell*.php" -o \
+        -iname "*.suspected" \
+        \) ! -path "*/vendor/*" \
+           ! -path "*/cache/*" \
+           ! -path "*/node_modules/*" \
+           ! -path "*/backup/*" \
+           ! -path "*/backups/*" \
+        2>/dev/null | head -20 >"$MALWARE_TMPFILE"
 fi
 
-SCAN_TIME=$(date '+%Y-%m-%d %H:%M:%S')
-echo -e "${DIM}掃描完成: ${SCAN_TIME}${NC}"
+MALWARE_COUNT=$(wc -l <"$MALWARE_TMPFILE" 2>/dev/null || echo 0)
+
+if [ "$MALWARE_COUNT" -gt 0 ]; then
+    echo -e "${RED}⚠ 發現 ${MALWARE_COUNT} 個可疑檔名${NC}"
+    echo ""
+    while IFS= read -r file; do
+        SITE_PATH=$(echo "$file" | grep -oP '/(var/www/|home/[^/]+/(public_html|www|web|app/public))' | head -1)
+        echo -e "${RED}├─ ${file}${NC}"
+        
+        if [ -n "$SITE_PATH" ]; then
+            SITE_THREATS["$SITE_PATH"]=$((${SITE_THREATS["$SITE_PATH"]:-0} + 1))
+        fi
+    done <"$MALWARE_TMPFILE"
+
+    THREATS_FOUND=$((THREATS_FOUND + MALWARE_COUNT))
+    CRITICAL_THREATS=$((CRITICAL_THREATS + MALWARE_COUNT))
+    add_alert "CRITICAL" "病毒檔名: ${MALWARE_COUNT} 個"
+else
+    echo -e "${GREEN}✓ 未發現病毒檔名${NC}"
+fi
+
+rm -f "$MALWARE_TMPFILE"
 echo ""
+
+# ==========================================
+# Webshell 掃描
+# ==========================================
+echo -e "${YELLOW}[3/4] 🔍 Webshell 特徵碼掃描${NC}"
+echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
+
+WEBSHELL_TMPFILE=$(mktemp)
+
+if [ -n "$SCAN_PATHS" ]; then
+    find $SCAN_PATHS -type f -name "*.php" \
+        ! -path "*/vendor/*" \
+        ! -path "*/cache/*" \
+        ! -path "*/node_modules/*" \
+        ! -path "*/backup/*" \
+        2>/dev/null | \
+    xargs -P 4 -I {} grep -lE "(eval\s*\(base64_decode|gzinflate\s*\(base64_decode|shell_exec\s*\(|system\s*\(.*\\\$_)" {} 2>/dev/null | \
+    head -20 >"$WEBSHELL_TMPFILE"
+fi
+
+WEBSHELL_COUNT=$(wc -l <"$WEBSHELL_TMPFILE" 2>/dev/null || echo 0)
+
+if [ "$WEBSHELL_COUNT" -gt 0 ]; then
+    echo -e "${RED}⚠ 發現 ${WEBSHELL_COUNT} 個可疑 PHP${NC}"
+    echo ""
+
+    while IFS= read -r file; do
+        SITE_PATH=$(echo "$file" | grep -oP '/(var/www/|home/[^/]+/(public_html|www|web|app/public))' | head -1)
+        echo -e "${RED}├─ ${file}${NC}"
+        
+        if [ -n "$SITE_PATH" ]; then
+            SITE_THREATS["$SITE_PATH"]=$((${SITE_THREATS["$SITE_PATH"]:-0} + 1))
+        fi
+    done <"$WEBSHELL_TMPFILE"
+
+    THREATS_FOUND=$((THREATS_FOUND + WEBSHELL_COUNT))
+    CRITICAL_THREATS=$((CRITICAL_THREATS + WEBSHELL_COUNT))
+    add_alert "CRITICAL" "Webshell: ${WEBSHELL_COUNT} 個"
+else
+    echo -e "${GREEN}✓ 未發現可疑 PHP${NC}"
+fi
+
+rm -f "$WEBSHELL_TMPFILE"
+echo ""
+
+# ==========================================
+# 疑似中毒網站
+# ==========================================
+if [ ${#SITE_THREATS[@]} -gt 0 ]; then
+    echo -e "${YELLOW}[4/4] 🚨 疑似中毒網站${NC}"
+    echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
+    
+    for site in "${!SITE_THREATS[@]}"; do
+        echo "${SITE_THREATS[$site]} $site"
+    done | sort -rn | while read count site; do
+        if [ "$count" -ge 5 ]; then
+            RISK_LEVEL="${RED}【高風險】${NC}"
+        elif [ "$count" -ge 3 ]; then
+            RISK_LEVEL="${YELLOW}【中風險】${NC}"
+        else
+            RISK_LEVEL="${YELLOW}【低風險】${NC}"
+        fi
+
+        echo -e "${RISK_LEVEL} ${WHITE}${site}${NC} - ${RED}${count} 個威脅${NC}"
+    done
+    echo ""
+fi
 
 # ==========================================
 # 總結報告
 # ==========================================
 echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════════${NC}"
-echo -e "${BOLD}${CYAN}   📊 系統健康度總結${NC}"
+echo -e "${BOLD}${CYAN}   📊 掃描結果總結${NC}"
 echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════════${NC}"
 
-HEALTH_SCORE=100
-
-# 扣分機制
-[ "${RAM_INT:-0}" -ge 90 ] && HEALTH_SCORE=$((HEALTH_SCORE - 20))
-[ "${RAM_INT:-0}" -ge 80 ] && HEALTH_SCORE=$((HEALTH_SCORE - 10))
-[ "$DISK_PERCENT" -ge 90 ] && HEALTH_SCORE=$((HEALTH_SCORE - 20))
-[ "$DISK_PERCENT" -ge 80 ] && HEALTH_SCORE=$((HEALTH_SCORE - 10))
-[ "$SWAP_INT" -ge 80 ] && HEALTH_SCORE=$((HEALTH_SCORE - 15))
-[ "$LOAD_CMP" == "過高" ] && HEALTH_SCORE=$((HEALTH_SCORE - 15))
-[ "$TOTAL_SUSPICIOUS" -gt 0 ] && HEALTH_SCORE=$((HEALTH_SCORE - 30))
-
-if [ "$HEALTH_SCORE" -ge 80 ]; then
-    HEALTH_COLOR=$GREEN
-    HEALTH_STATUS="優良"
-elif [ "$HEALTH_SCORE" -ge 60 ]; then
-    HEALTH_COLOR=$YELLOW
-    HEALTH_STATUS="中等"
+if [ "$CRITICAL_THREATS" -gt 0 ]; then
+    THREAT_LEVEL="${RED}🔥 嚴重威脅 - ${CRITICAL_THREATS} 個重大問題${NC}"
+elif [ "$THREATS_FOUND" -gt 10 ]; then
+    THREAT_LEVEL="${YELLOW}⚡ 中等風險${NC}"
+elif [ "$THREATS_FOUND" -gt 0 ]; then
+    THREAT_LEVEL="${YELLOW}⚡ 低風險${NC}"
 else
-    HEALTH_COLOR=$RED
-    HEALTH_STATUS="需注意"
+    THREAT_LEVEL="${GREEN}✓ 系統安全${NC}"
 fi
 
-echo -e "${BOLD}系統健康度:${NC} ${HEALTH_COLOR}${HEALTH_SCORE}/100${NC} ${DIM}(${HEALTH_STATUS})${NC}"
+echo -e "${BOLD}威脅等級:${NC} ${THREAT_LEVEL}"
+echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
+echo -e "發現威脅: ${WHITE}${THREATS_FOUND}${NC} | 關鍵威脅: ${RED}${CRITICAL_THREATS}${NC} | 已清除: ${GREEN}${THREATS_CLEANED}${NC}"
 
 if [ ${#ALERTS[@]} -gt 0 ]; then
     echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
-    echo -e "${RED}${BOLD}⚠ 警告事項:${NC}"
+    echo -e "${RED}${BOLD}⚠ 重要告警:${NC}"
     echo ""
     
     for alert in "${ALERTS[@]}"; do
@@ -657,4 +911,17 @@ fi
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
 echo -e "${DIM}掃描完成: $(date '+%Y-%m-%d %H:%M:%S')${NC}"
 echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════════${NC}"
+echo ""
+
+echo -e "${MAGENTA}💡 安全建議:${NC}"
+if [ "$CRITICAL_THREATS" -eq 0 ] && [ "$THREATS_FOUND" -lt 5 ]; then
+    echo -e "${GREEN}✓ 系統安全狀況良好${NC}"
+    echo -e "${DIM}  • 持續監控系統資源${NC}"
+    echo -e "${DIM}  • 定期更新系統與軟體${NC}"
+else
+    echo -e "${YELLOW}⚠ 建議立即處理發現的威脅${NC}"
+    echo -e "${DIM}  • 檢查並刪除可疑檔案${NC}"
+    echo -e "${DIM}  • 更改所有管理員密碼${NC}"
+    echo -e "${DIM}  • 更新 WordPress 與外掛${NC}"
+fi
 echo ""
