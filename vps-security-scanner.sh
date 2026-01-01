@@ -1,13 +1,15 @@
 #!/bin/bash
 
 #################################################
-# VPS 系統資源與安全掃描工具 v7.0.0 - 完整版
+# VPS 系統資源與安全掃描工具 v7.1.0 - 完整版
 # 修正項目:
-#  1. 惡意行程只警告不自動 kill
-#  2. Fail2Ban ignore IP: 114.39.15.25
-#  3. auth.log 只掃描最近24小時
-#  4. 限制 find 掃描深度與範圍
-#  5. 先看見風險,再手動處理
+#  1. 使用 journalctl 準確掃描最近24小時
+#  2. 修正 Banned IP list 顯示
+#  3. 顯示 Fail2Ban 目前規則
+#  4. 優化 ps 查詢效能 (使用 pgrep)
+#  5. 精確掃描高風險目錄,排除 uploads
+#  6. 非 root 顯示警告並退出
+#  7. 修正記憶體按網站統計
 #################################################
 
 # 顏色定義
@@ -21,25 +23,25 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="7.0.0"
+VERSION="7.1.0"
 
 # 固定白名單 IP
 WHITELIST_IP="114.39.15.25"
-
-# 掃描範圍 - 僅高風險目錄
-SCAN_ROOT_BASE=(
-    "/var/www"
-    "/home"
-)
-
-# 掃描深度限制
-MAX_SCAN_DEPTH=5
 
 # 效能優化
 renice -n 19 $$ >/dev/null 2>&1
 ionice -c3 -p $$ >/dev/null 2>&1
 
 clear
+
+# ==========================================
+# Root 權限檢查
+# ==========================================
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}${BOLD}⚠ 錯誤: 此腳本需要 root 權限執行${NC}"
+    echo -e "${YELLOW}請使用: sudo $0${NC}"
+    exit 1
+fi
 
 # ==========================================
 # 工具函式
@@ -63,26 +65,52 @@ add_alert() {
 }
 
 build_scan_paths() {
-    local roots=()
+    local paths=()
     
-    # 只掃描明確的 web 根目錄
-    [ -d "/var/www" ] && roots+=("/var/www")
+    # 掃描 /var/www 下的高風險目錄
+    if [ -d "/var/www" ]; then
+        while IFS= read -r dir; do
+            [ -d "$dir/wp-content/themes" ] && paths+=("$dir/wp-content/themes")
+            [ -d "$dir/wp-content/plugins" ] && paths+=("$dir/wp-content/plugins")
+            # 根目錄本身
+            paths+=("$dir")
+        done < <(find /var/www -mindepth 1 -maxdepth 2 -type d 2>/dev/null)
+    fi
     
+    # 掃描 /home 下的高風險目錄
     if [ -d "/home" ]; then
-        while IFS= read -r d; do
-            [ -d "$d/public_html" ] && roots+=("$d/public_html")
-            [ -d "$d/www" ] && roots+=("$d/www")
-            [ -d "$d/web" ] && roots+=("$d/web")
+        while IFS= read -r user_dir; do
+            # public_html
+            if [ -d "$user_dir/public_html" ]; then
+                paths+=("$user_dir/public_html")
+                [ -d "$user_dir/public_html/wp-content/themes" ] && paths+=("$user_dir/public_html/wp-content/themes")
+                [ -d "$user_dir/public_html/wp-content/plugins" ] && paths+=("$user_dir/public_html/wp-content/plugins")
+            fi
+            # www
+            if [ -d "$user_dir/www" ]; then
+                paths+=("$user_dir/www")
+                [ -d "$user_dir/www/wp-content/themes" ] && paths+=("$user_dir/www/wp-content/themes")
+                [ -d "$user_dir/www/wp-content/plugins" ] && paths+=("$user_dir/www/wp-content/plugins")
+            fi
+            # web
+            if [ -d "$user_dir/web" ]; then
+                paths+=("$user_dir/web")
+                [ -d "$user_dir/web/wp-content/themes" ] && paths+=("$user_dir/web/wp-content/themes")
+                [ -d "$user_dir/web/wp-content/plugins" ] && paths+=("$user_dir/web/wp-content/plugins")
+            fi
         done < <(find /home -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
     fi
-
+    
+    # FlyWP 架構
     if [ -d "/home/fly" ]; then
-        while IFS= read -r d; do
-            [ -d "$d/app/public" ] && roots+=("$d/app/public")
+        while IFS= read -r site_dir; do
+            [ -d "$site_dir/app/public" ] && paths+=("$site_dir/app/public")
+            [ -d "$site_dir/app/public/wp-content/themes" ] && paths+=("$site_dir/app/public/wp-content/themes")
+            [ -d "$site_dir/app/public/wp-content/plugins" ] && paths+=("$site_dir/app/public/wp-content/plugins")
         done < <(find /home/fly -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
     fi
-
-    printf '%s\n' "${roots[@]}" | sort -u | tr '\n' ' '
+    
+    printf '%s\n' "${paths[@]}" | sort -u | tr '\n' ' '
 }
 
 get_threat_level() {
@@ -113,7 +141,6 @@ SCAN_PATHS="$(build_scan_paths)"
 
 # 計數器
 THREATS_FOUND=0
-THREATS_CLEANED=0
 ALERTS=()
 CRITICAL_THREATS=0
 HIGH_RISK_IPS_COUNT=0
@@ -285,7 +312,7 @@ done
 echo ""
 
 # ==========================================
-# 按網站統計記憶體占用
+# 按網站統計記憶體占用 (使用 pgrep 優化)
 # ==========================================
 echo -e "${DIM}按網站/用戶統計記憶體占用:${NC}"
 
@@ -294,10 +321,15 @@ if [ -d "/home/fly" ]; then
     
     while IFS= read -r site_dir; do
         SITE_NAME=$(basename "$site_dir")
-        MEM_USAGE=$(ps aux | grep "php-fpm.*${SITE_NAME}" | grep -v grep | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
+        # 使用 pgrep 優化
+        PHP_PIDS=$(pgrep -f "php-fpm.*${SITE_NAME}" 2>/dev/null)
         
-        if [ -n "$MEM_USAGE" ] && [ "$MEM_USAGE" -gt 0 ]; then
-            SITE_MEM["$SITE_NAME"]=$MEM_USAGE
+        if [ -n "$PHP_PIDS" ]; then
+            MEM_USAGE=$(ps -p $PHP_PIDS -o rss= 2>/dev/null | awk '{sum+=$1} END {printf "%.0f", sum/1024}')
+            
+            if [ -n "$MEM_USAGE" ] && [ "$MEM_USAGE" -gt 0 ]; then
+                SITE_MEM["$SITE_NAME"]=$MEM_USAGE
+            fi
         fi
     done < <(find /home/fly -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
     
@@ -319,7 +351,11 @@ if [ -d "/home/fly" ]; then
     fi
 else
     echo -e "  ${DIM}按用戶統計:${NC}"
-    ps aux | grep -E "[p]hp-fpm" | awk '{mem[$1]+=$6} END {for(u in mem) printf "  %-10s %dM\n", u, mem[u]/1024}' | sort -k2 -rn | head -10
+    # 使用 pgrep 優化
+    PHP_PIDS=$(pgrep -f "php-fpm" 2>/dev/null)
+    if [ -n "$PHP_PIDS" ]; then
+        ps -p $PHP_PIDS -o user=,rss= 2>/dev/null | awk '{mem[$1]+=$2} END {for(u in mem) printf "  %-10s %dM\n", u, mem[u]/1024}' | sort -k2 -rn | head -10
+    fi
 fi
 echo ""
 
@@ -441,17 +477,17 @@ fi
 echo ""
 
 # ==========================================
-# 資料庫服務檢查
+# 資料庫服務檢查 (使用 pgrep 優化)
 # ==========================================
 echo -e "${BOLD}${CYAN}▶ 資料庫服務檢查${NC}"
 
 DB_FOUND=0
 
-if pgrep -x "mysqld\|mariadbd" >/dev/null 2>&1; then
-    PROC_NAME=$(pgrep -x mysqld >/dev/null && echo "mysqld" || echo "mariadbd")
-    CPU=$(ps aux | grep -E "[$PROC_NAME]" | awk '{sum+=$3} END {printf "%.1f", sum}')
-    MEM=$(ps aux | grep -E "[$PROC_NAME]" | awk '{sum+=$4} END {printf "%.1f", sum}')
-    RSS=$(ps aux | grep -E "[$PROC_NAME]" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
+# MySQL/MariaDB
+MYSQL_PIDS=$(pgrep -x "mysqld|mariadbd" 2>/dev/null)
+if [ -n "$MYSQL_PIDS" ]; then
+    DB_STATS=$(ps -p $MYSQL_PIDS -o %cpu=,%mem=,rss= 2>/dev/null | awk '{cpu+=$1; mem+=$2; rss+=$3} END {printf "%.1f %.1f %.0f", cpu, mem, rss/1024}')
+    read CPU MEM RSS <<< "$DB_STATS"
 
     echo -e "${GREEN}✓ MySQL/MariaDB 運行中${NC}"
     echo -e "  ${DIM}CPU: ${WHITE}${CPU}%${DIM} | 記憶體: ${WHITE}${MEM}% (${RSS}M)${NC}"
@@ -479,10 +515,11 @@ if pgrep -x "mysqld\|mariadbd" >/dev/null 2>&1; then
     DB_FOUND=1
 fi
 
-if pgrep -x "redis-server" >/dev/null 2>&1; then
-    CPU=$(ps aux | grep -E "[r]edis-server" | awk '{sum+=$3} END {printf "%.1f", sum}')
-    MEM=$(ps aux | grep -E "[r]edis-server" | awk '{sum+=$4} END {printf "%.1f", sum}')
-    RSS=$(ps aux | grep -E "[r]edis-server" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
+# Redis
+REDIS_PIDS=$(pgrep -x "redis-server" 2>/dev/null)
+if [ -n "$REDIS_PIDS" ]; then
+    DB_STATS=$(ps -p $REDIS_PIDS -o %cpu=,%mem=,rss= 2>/dev/null | awk '{cpu+=$1; mem+=$2; rss+=$3} END {printf "%.1f %.1f %.0f", cpu, mem, rss/1024}')
+    read CPU MEM RSS <<< "$DB_STATS"
 
     echo -e "${GREEN}✓ Redis 運行中${NC}"
     echo -e "  ${DIM}CPU: ${WHITE}${CPU}%${DIM} | 記憶體: ${WHITE}${MEM}% (${RSS}M)${NC}"
@@ -532,27 +569,29 @@ fi
 echo ""
 
 # ==========================================
-# 網站服務
+# 網站服務 (使用 pgrep 優化)
 # ==========================================
 echo -e "${BOLD}${CYAN}▶ 網站服務資源使用${NC}"
 WEB_SERVICES=0
 
-if pgrep -x nginx >/dev/null 2>&1; then
-    PROCS=$(pgrep -x nginx | wc -l)
-    CPU=$(ps aux | grep -E "[n]ginx" | awk '{sum+=$3} END {printf "%.1f", sum}')
-    MEM=$(ps aux | grep -E "[n]ginx" | awk '{sum+=$4} END {printf "%.1f", sum}')
-    RSS=$(ps aux | grep -E "[n]ginx" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
+# Nginx
+NGINX_PIDS=$(pgrep -x nginx 2>/dev/null)
+if [ -n "$NGINX_PIDS" ]; then
+    PROCS=$(echo "$NGINX_PIDS" | wc -w)
+    WEB_STATS=$(ps -p $NGINX_PIDS -o %cpu=,%mem=,rss= 2>/dev/null | awk '{cpu+=$1; mem+=$2; rss+=$3} END {printf "%.1f %.1f %.0f", cpu, mem, rss/1024}')
+    read CPU MEM RSS <<< "$WEB_STATS"
 
     echo -e "${GREEN}✓ Nginx${NC}"
     echo -e "   ${DIM}進程: ${WHITE}${PROCS}${DIM} | CPU: ${WHITE}${CPU}%${DIM} | 記憶體: ${WHITE}${MEM}% (${RSS}M)${NC}"
     WEB_SERVICES=1
 fi
 
-if pgrep -f "php-fpm" >/dev/null 2>&1; then
-    PROCS=$(pgrep -f "php-fpm" | wc -l)
-    CPU=$(ps aux | grep -E "[p]hp-fpm" | awk '{sum+=$3} END {printf "%.1f", sum}')
-    MEM=$(ps aux | grep -E "[p]hp-fpm" | awk '{sum+=$4} END {printf "%.1f", sum}')
-    RSS=$(ps aux | grep -E "[p]hp-fpm" | awk '{sum+=$6} END {printf "%.0f", sum/1024}')
+# PHP-FPM
+PHP_PIDS=$(pgrep -f "php-fpm" 2>/dev/null)
+if [ -n "$PHP_PIDS" ]; then
+    PROCS=$(echo "$PHP_PIDS" | wc -w)
+    WEB_STATS=$(ps -p $PHP_PIDS -o %cpu=,%mem=,rss= 2>/dev/null | awk '{cpu+=$1; mem+=$2; rss+=$3} END {printf "%.1f %.1f %.0f", cpu, mem, rss/1024}')
+    read CPU MEM RSS <<< "$WEB_STATS"
 
     echo -e "${GREEN}✓ PHP-FPM${NC}"
     echo -e "   ${DIM}進程: ${WHITE}${PROCS}${DIM} | CPU: ${WHITE}${CPU}%${DIM} | 記憶體: ${WHITE}${MEM}% (${RSS}M)${NC}"
@@ -600,37 +639,26 @@ fi
 echo ""
 
 # ==========================================
-# 失敗登入分析 (只掃描最近24小時)
+# 失敗登入分析 (使用 journalctl 準確掃描最近24小時)
 # ==========================================
-if [ -f /var/log/auth.log ]; then
-    LOG_FILE="/var/log/auth.log"
-elif [ -f /var/log/secure ]; then
-    LOG_FILE="/var/log/secure"
-else
-    LOG_FILE=""
-fi
+echo -e "${BOLD}${CYAN}▶ 失敗登入分析 (最近24小時)${NC}"
 
 FAILED_COUNT=0
 CRITICAL_COUNT=0
 
-if [ -n "$LOG_FILE" ]; then
-    # 計算24小時前的時間戳
-    TIME_24H_AGO=$(date -d "24 hours ago" '+%b %e' 2>/dev/null)
+if command -v journalctl &>/dev/null; then
+    # 使用 journalctl 準確掃描最近24小時
+    ANALYSIS_TMP=$(mktemp)
     
-    # 只掃描最近24小時的失敗登入
-    FAILED_COUNT=$(grep "Failed password" "$LOG_FILE" 2>/dev/null | \
-                  awk -v cutoff="$TIME_24H_AGO" '$0 ~ cutoff {flag=1} flag' | \
-                  wc -l)
+    journalctl --since "24 hours ago" --no-pager 2>/dev/null | \
+    grep "Failed password" | \
+    awk '{for(i=1;i<=NF;i++){if($i=="from"){print $(i+1)}}}' | \
+    grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | \
+    sort | uniq -c | sort -rn > "$ANALYSIS_TMP"
+    
+    FAILED_COUNT=$(awk '{sum+=$1} END {print sum}' "$ANALYSIS_TMP" 2>/dev/null || echo 0)
     
     if [ "$FAILED_COUNT" -gt 0 ]; then
-        ANALYSIS_TMP=$(mktemp)
-        
-        grep "Failed password" "$LOG_FILE" 2>/dev/null | \
-        awk -v cutoff="$TIME_24H_AGO" '$0 ~ cutoff {flag=1} flag' | \
-        awk '{for(i=1;i<=NF;i++){if($i=="from"){print $(i+1)}}}' | \
-        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | \
-        sort | uniq -c | sort -rn > "$ANALYSIS_TMP"
-        
         # 收集極高風險 IP
         while read count ip; do
             if [ "$count" -ge 500 ]; then
@@ -645,9 +673,50 @@ if [ -n "$LOG_FILE" ]; then
             CRITICAL_THREATS=$((CRITICAL_THREATS + CRITICAL_COUNT))
         fi
     fi
+else
+    # Fallback 到 auth.log (使用時間戳比對)
+    if [ -f /var/log/auth.log ]; then
+        LOG_FILE="/var/log/auth.log"
+    elif [ -f /var/log/secure ]; then
+        LOG_FILE="/var/log/secure"
+    else
+        LOG_FILE=""
+    fi
+    
+    if [ -n "$LOG_FILE" ]; then
+        ANALYSIS_TMP=$(mktemp)
+        TIME_24H_AGO=$(date -d "24 hours ago" +%s 2>/dev/null)
+        
+        grep "Failed password" "$LOG_FILE" 2>/dev/null | while read line; do
+            LOG_TIME=$(echo "$line" | awk '{print $1, $2, $3}')
+            LOG_TIMESTAMP=$(date -d "$LOG_TIME" +%s 2>/dev/null)
+            
+            if [ -n "$LOG_TIMESTAMP" ] && [ "$LOG_TIMESTAMP" -ge "$TIME_24H_AGO" ]; then
+                echo "$line"
+            fi
+        done | \
+        awk '{for(i=1;i<=NF;i++){if($i=="from"){print $(i+1)}}}' | \
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | \
+        sort | uniq -c | sort -rn > "$ANALYSIS_TMP"
+        
+        FAILED_COUNT=$(awk '{sum+=$1} END {print sum}' "$ANALYSIS_TMP" 2>/dev/null || echo 0)
+        
+        if [ "$FAILED_COUNT" -gt 0 ]; then
+            while read count ip; do
+                if [ "$count" -ge 500 ]; then
+                    HIGH_RISK_IPS="${HIGH_RISK_IPS} ${ip}"
+                    HIGH_RISK_IPS_COUNT=$((HIGH_RISK_IPS_COUNT + 1))
+                    CRITICAL_COUNT=$((CRITICAL_COUNT + 1))
+                fi
+            done < "$ANALYSIS_TMP"
+            
+            if [ "$CRITICAL_COUNT" -gt 0 ]; then
+                add_alert "CRITICAL" "極高風險爆破: ${CRITICAL_COUNT} 個 IP"
+                CRITICAL_THREATS=$((CRITICAL_THREATS + CRITICAL_COUNT))
+            fi
+        fi
+    fi
 fi
-
-echo -e "${BOLD}${CYAN}▶ 失敗登入分析 (最近24小時)${NC}"
 
 if [ "$FAILED_COUNT" -eq 0 ]; then
     echo -e "${GREEN}✓ 無失敗登入記錄${NC}"
@@ -714,7 +783,6 @@ if ! command -v fail2ban-client &>/dev/null; then
     echo -e "${CYAN}▶ 開始自動安裝 Fail2Ban (10分鐘/5次/封1小時)...${NC}"
     echo ""
     
-    # 直接安裝,不詢問
     if [ -f /etc/debian_version ]; then
         echo -ne "${DIM}[1/3] 更新套件清單...${NC}"
         apt-get update -qq >/dev/null 2>&1 && echo -e " ${GREEN}✓${NC}" || echo -e " ${RED}✗${NC}"
@@ -732,12 +800,12 @@ if ! command -v fail2ban-client &>/dev/null; then
     if command -v fail2ban-client &>/dev/null; then
         echo -ne "${DIM}[3/3] 設定規則與啟動服務...${NC}"
         
-        # 獲取當前 IP 避免自己被鎖
+        # 獲取當前 IP
         CURRENT_IP=$(who am i | awk '{print $5}' | tr -d '()' 2>/dev/null)
         [ -z "$CURRENT_IP" ] && CURRENT_IP=$(echo $SSH_CLIENT | awk '{print $1}' 2>/dev/null)
         [ -z "$CURRENT_IP" ] && CURRENT_IP="0.0.0.0/0"
         
-        # 寫入配置檔 (包含白名單IP)
+        # 寫入配置檔
         cat >/etc/fail2ban/jail.local <<EOF
 [DEFAULT]
 ignoreip = 127.0.0.1/8 ::1 ${CURRENT_IP} ${WHITELIST_IP}
@@ -756,10 +824,8 @@ bantime = 1h
 findtime = 10m
 EOF
         
-        # 針對 CentOS/RHEL 修正日誌路徑
         [ -f /etc/redhat-release ] && sed -i 's|logpath = /var/log/auth.log|logpath = /var/log/secure|' /etc/fail2ban/jail.local
         
-        # 啟動服務
         systemctl enable fail2ban >/dev/null 2>&1
         systemctl restart fail2ban >/dev/null 2>&1
         sleep 3
@@ -782,6 +848,15 @@ fi
 
 # 顯示 Fail2Ban 狀態
 if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ban; then
+    echo -e "${BOLD}${CYAN}▶ 目前規則設定:${NC}"
+    if [ -f /etc/fail2ban/jail.local ]; then
+        echo -e "${DIM}白名單 IP:${NC} $(grep "ignoreip" /etc/fail2ban/jail.local | cut -d'=' -f2 | xargs)"
+        echo -e "${DIM}封鎖時間:${NC} $(grep "bantime" /etc/fail2ban/jail.local | head -1 | cut -d'=' -f2 | xargs)"
+        echo -e "${DIM}時間範圍:${NC} $(grep "findtime" /etc/fail2ban/jail.local | head -1 | cut -d'=' -f2 | xargs)"
+        echo -e "${DIM}最大重試:${NC} $(grep "maxretry" /etc/fail2ban/jail.local | head -1 | cut -d'=' -f2 | xargs)"
+    fi
+    echo ""
+    
     echo -e "${BOLD}${CYAN}▶ 所有監控狀態:${NC}"
     fail2ban-client status 2>/dev/null | while read line; do
         echo -e "${DIM}${line}${NC}"
@@ -800,17 +875,20 @@ if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ba
     done
     echo ""
     
-    # 顯示目前被封鎖的 IP
+    # 顯示目前被封鎖的 IP (修正顯示)
     BANNED_NOW=$(fail2ban-client status sshd 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
     if [ "${BANNED_NOW:-0}" -gt 0 ]; then
-        echo -e "${BOLD}${CYAN}▶ 目前被封鎖的 IP:${NC}"
-        BANNED_IPS=$(fail2ban-client status sshd 2>/dev/null | grep "Banned IP list:" | sed 's/.*Banned IP list://')
+        echo -e "${BOLD}${CYAN}▶ 目前被封鎖的 IP (${BANNED_NOW} 個):${NC}"
+        BANNED_IPS=$(fail2ban-client status sshd 2>/dev/null | grep -A 1 "Banned IP list:" | tail -1 | xargs)
         
         if [ -n "$BANNED_IPS" ]; then
             for ip in $BANNED_IPS; do
                 echo -e "  ${RED}├─ ${ip}${NC}"
             done
         fi
+        echo ""
+    else
+        echo -e "${GREEN}✓ 目前無封鎖 IP${NC}"
         echo ""
     fi
     
@@ -830,44 +908,49 @@ elif command -v fail2ban-client &>/dev/null; then
 fi
 
 # ==========================================
-# 惡意 Process 掃描 (只警告不 kill)
+# 惡意 Process 掃描 (使用 pgrep,只警告不 kill)
 # ==========================================
 echo -e "${YELLOW}[1/4] 🔍 惡意 Process 掃描${NC}"
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
 
-# 更嚴格的誤判避免規則
-MALICIOUS_PROCESSES=$(ps aux | awk 'length($11) == 8 && $11 ~ /^[a-z0-9]+$/ && $11 !~ /lsphp|systemd|docker|mysql|redis|lighttpd|postgres|memcache|sshd|nginx|apache|node|python|java|ruby/' | grep -v "USER" | wc -l)
-CRYPTO_MINERS=$(ps aux | grep -iE "xmrig|minerd|cpuminer|ccminer|cryptonight|monero|kinsing" | grep -v grep | wc -l)
-TOTAL_SUSPICIOUS=$((MALICIOUS_PROCESSES + CRYPTO_MINERS))
+# 使用 pgrep 先篩選可疑進程
+MALICIOUS_PIDS=$(ps aux | awk 'length($11) == 8 && $11 ~ /^[a-z0-9]+$/ && $11 !~ /lsphp|systemd|docker|mysql|redis|lighttpd|postgres|memcache|sshd|nginx|apache|node|python|java|ruby|chronyd|rsyslogd/' | grep -v "USER" | awk '{print $2}')
+CRYPTO_MINER_PIDS=$(pgrep -f "xmrig|minerd|cpuminer|ccminer|cryptonight|monero|kinsing" 2>/dev/null)
+
+MALICIOUS_COUNT=$(echo "$MALICIOUS_PIDS" | grep -c '^' 2>/dev/null || echo 0)
+CRYPTO_COUNT=$(echo "$CRYPTO_MINER_PIDS" | grep -c '^' 2>/dev/null || echo 0)
+TOTAL_SUSPICIOUS=$((MALICIOUS_COUNT + CRYPTO_COUNT))
 
 if [ "$TOTAL_SUSPICIOUS" -gt 0 ]; then
     echo -e "${RED}⚠ 發現 ${TOTAL_SUSPICIOUS} 個可疑 process${NC}"
     echo ""
 
-    if [ "$MALICIOUS_PROCESSES" -gt 0 ]; then
-        echo -e "${RED}├─ 亂碼名稱: ${MALICIOUS_PROCESSES} 個${NC}"
-        ps aux | awk 'length($11) == 8 && $11 ~ /^[a-z0-9]+$/ && $11 !~ /lsphp|systemd|docker|mysql|redis|lighttpd|postgres|memcache|sshd|nginx|apache|node|python|java|ruby/' | grep -v "USER" | head -5 | while read line; do
-            PROC=$(echo "$line" | awk '{print $11}')
-            PID=$(echo "$line" | awk '{print $2}')
-            CPU_P=$(echo "$line" | awk '{print $3}')
-            USER=$(echo "$line" | awk '{print $1}')
-            echo -e "${RED}│  • ${PROC} ${DIM}(PID: ${PID}, User: ${USER}, CPU: ${CPU_P}%)${NC}"
+    if [ "$MALICIOUS_COUNT" -gt 0 ]; then
+        echo -e "${RED}├─ 亂碼名稱: ${MALICIOUS_COUNT} 個${NC}"
+        for pid in $MALICIOUS_PIDS; do
+            [ -z "$pid" ] && continue
+            PS_INFO=$(ps -p $pid -o user=,pid=,%cpu=,comm= 2>/dev/null)
+            [ -z "$PS_INFO" ] && continue
+            
+            read USER PID CPU PROC <<< "$PS_INFO"
+            echo -e "${RED}│  • ${PROC} ${DIM}(PID: ${PID}, User: ${USER}, CPU: ${CPU}%)${NC}"
             SUSPICIOUS_PROCESSES+=("kill -9 $PID  # $PROC")
-        done
+        done | head -5
     fi
 
-    if [ "$CRYPTO_MINERS" -gt 0 ]; then
-        echo -e "${RED}├─ 挖礦程式: ${CRYPTO_MINERS} 個${NC}"
-        ps aux | grep -iE "xmrig|minerd|cpuminer" | grep -v grep | head -5 | while read line; do
-            PROC=$(echo "$line" | awk '{print $11}')
-            PID=$(echo "$line" | awk '{print $2}')
-            CPU_P=$(echo "$line" | awk '{print $3}')
-            USER=$(echo "$line" | awk '{print $1}')
-            echo -e "${RED}│  • ${PROC} ${DIM}(PID: ${PID}, User: ${USER}, CPU: ${CPU_P}%)${NC}"
+    if [ "$CRYPTO_COUNT" -gt 0 ]; then
+        echo -e "${RED}├─ 挖礦程式: ${CRYPTO_COUNT} 個${NC}"
+        for pid in $CRYPTO_MINER_PIDS; do
+            [ -z "$pid" ] && continue
+            PS_INFO=$(ps -p $pid -o user=,pid=,%cpu=,comm= 2>/dev/null)
+            [ -z "$PS_INFO" ] && continue
+            
+            read USER PID CPU PROC <<< "$PS_INFO"
+            echo -e "${RED}│  • ${PROC} ${DIM}(PID: ${PID}, User: ${USER}, CPU: ${CPU}%)${NC}"
             SUSPICIOUS_PROCESSES+=("kill -9 $PID  # $PROC")
-        done
-        add_alert "CRITICAL" "挖礦程式: ${CRYPTO_MINERS} 個"
-        CRITICAL_THREATS=$((CRITICAL_THREATS + CRYPTO_MINERS))
+        done | head -5
+        add_alert "CRITICAL" "挖礦程式: ${CRYPTO_COUNT} 個"
+        CRITICAL_THREATS=$((CRITICAL_THREATS + CRYPTO_COUNT))
     fi
 
     THREATS_FOUND=$((THREATS_FOUND + TOTAL_SUSPICIOUS))
@@ -877,28 +960,33 @@ fi
 echo ""
 
 # ==========================================
-# 病毒檔名掃描 (限制深度)
+# 病毒檔名掃描 (精確高風險目錄,排除 uploads)
 # ==========================================
-echo -e "${YELLOW}[2/4] 🦠 病毒檔名掃描 (深度限制: ${MAX_SCAN_DEPTH})${NC}"
+echo -e "${YELLOW}[2/4] 🦠 病毒檔名掃描 (高風險目錄)${NC}"
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
 
 MALWARE_TMPFILE=$(mktemp)
 
 if [ -n "$SCAN_PATHS" ]; then
-    find $SCAN_PATHS -maxdepth $MAX_SCAN_DEPTH -type f \( \
-        -iname "*c99*.php" -o \
-        -iname "*r57*.php" -o \
-        -iname "*wso*.php" -o \
-        -iname "*shell*.php" -o \
-        -iname "*backdoor*.php" -o \
-        -iname "*webshell*.php" -o \
-        -iname "*.suspected" \
-        \) ! -path "*/vendor/*" \
-           ! -path "*/cache/*" \
-           ! -path "*/node_modules/*" \
-           ! -path "*/backup/*" \
-           ! -path "*/backups/*" \
-        2>/dev/null | head -20 >"$MALWARE_TMPFILE"
+    for path in $SCAN_PATHS; do
+        [ ! -d "$path" ] && continue
+        
+        find "$path" -maxdepth 3 -type f \( \
+            -iname "*c99*.php" -o \
+            -iname "*r57*.php" -o \
+            -iname "*wso*.php" -o \
+            -iname "*shell*.php" -o \
+            -iname "*backdoor*.php" -o \
+            -iname "*webshell*.php" -o \
+            -iname "*.suspected" \
+            \) ! -path "*/uploads/*" \
+               ! -path "*/vendor/*" \
+               ! -path "*/cache/*" \
+               ! -path "*/node_modules/*" \
+               ! -path "*/backup/*" \
+               ! -path "*/backups/*" \
+            2>/dev/null
+    done | head -20 > "$MALWARE_TMPFILE"
 fi
 
 MALWARE_COUNT=$(wc -l <"$MALWARE_TMPFILE" 2>/dev/null || echo 0)
@@ -907,7 +995,7 @@ if [ "$MALWARE_COUNT" -gt 0 ]; then
     echo -e "${RED}⚠ 發現 ${MALWARE_COUNT} 個可疑檔名${NC}"
     echo ""
     while IFS= read -r file; do
-        SITE_PATH=$(echo "$file" | grep -oP '/(var/www/|home/[^/]+/(public_html|www|web|app/public))' | head -1)
+        SITE_PATH=$(echo "$file" | grep -oP '/(var/www/[^/]+|home/[^/]+/(public_html|www|web|app/public))' | head -1)
         echo -e "${RED}├─ ${file}${NC}"
         MALWARE_FILES+=("$file")
         
@@ -927,22 +1015,27 @@ rm -f "$MALWARE_TMPFILE"
 echo ""
 
 # ==========================================
-# Webshell 掃描 (限制深度)
+# Webshell 掃描 (精確高風險目錄,排除 uploads)
 # ==========================================
-echo -e "${YELLOW}[3/4] 🔍 Webshell 特徵碼掃描 (深度限制: ${MAX_SCAN_DEPTH})${NC}"
+echo -e "${YELLOW}[3/4] 🔍 Webshell 特徵碼掃描 (高風險目錄)${NC}"
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
 
 WEBSHELL_TMPFILE=$(mktemp)
 
 if [ -n "$SCAN_PATHS" ]; then
-    find $SCAN_PATHS -maxdepth $MAX_SCAN_DEPTH -type f -name "*.php" \
-        ! -path "*/vendor/*" \
-        ! -path "*/cache/*" \
-        ! -path "*/node_modules/*" \
-        ! -path "*/backup/*" \
-        2>/dev/null | \
+    for path in $SCAN_PATHS; do
+        [ ! -d "$path" ] && continue
+        
+        find "$path" -maxdepth 3 -type f -name "*.php" \
+            ! -path "*/uploads/*" \
+            ! -path "*/vendor/*" \
+            ! -path "*/cache/*" \
+            ! -path "*/node_modules/*" \
+            ! -path "*/backup/*" \
+            2>/dev/null
+    done | \
     xargs -P 4 -I {} grep -lE "(eval\s*\(base64_decode|gzinflate\s*\(base64_decode|shell_exec\s*\(|system\s*\(.*\\\$_)" {} 2>/dev/null | \
-    head -20 >"$WEBSHELL_TMPFILE"
+    head -20 > "$WEBSHELL_TMPFILE"
 fi
 
 WEBSHELL_COUNT=$(wc -l <"$WEBSHELL_TMPFILE" 2>/dev/null || echo 0)
@@ -952,7 +1045,7 @@ if [ "$WEBSHELL_COUNT" -gt 0 ]; then
     echo ""
 
     while IFS= read -r file; do
-        SITE_PATH=$(echo "$file" | grep -oP '/(var/www/|home/[^/]+/(public_html|www|web|app/public))' | head -1)
+        SITE_PATH=$(echo "$file" | grep -oP '/(var/www/[^/]+|home/[^/]+/(public_html|www|web|app/public))' | head -1)
         echo -e "${RED}├─ ${file}${NC}"
         WEBSHELL_FILES+=("$file")
         
@@ -1035,14 +1128,13 @@ if [ ${#ALERTS[@]} -gt 0 ]; then
 fi
 
 # ==========================================
-# 處理建議 (顯示所有清理指令)
+# 處理建議
 # ==========================================
 if [ "$THREATS_FOUND" -gt 0 ]; then
     echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
     echo -e "${YELLOW}${BOLD}🛠️  建議處理指令:${NC}"
     echo ""
     
-    # 可疑 Process
     if [ ${#SUSPICIOUS_PROCESSES[@]} -gt 0 ]; then
         echo -e "${CYAN}▶ 終止可疑 Process:${NC}"
         for cmd in "${SUSPICIOUS_PROCESSES[@]}"; do
@@ -1051,7 +1143,6 @@ if [ "$THREATS_FOUND" -gt 0 ]; then
         echo ""
     fi
     
-    # 惡意檔案
     if [ ${#MALWARE_FILES[@]} -gt 0 ]; then
         echo -e "${CYAN}▶ 刪除病毒檔案:${NC}"
         for file in "${MALWARE_FILES[@]}"; do
@@ -1060,7 +1151,6 @@ if [ "$THREATS_FOUND" -gt 0 ]; then
         echo ""
     fi
     
-    # Webshell
     if [ ${#WEBSHELL_FILES[@]} -gt 0 ]; then
         echo -e "${CYAN}▶ 檢視並刪除 Webshell:${NC}"
         for file in "${WEBSHELL_FILES[@]}"; do
@@ -1070,7 +1160,6 @@ if [ "$THREATS_FOUND" -gt 0 ]; then
         echo ""
     fi
     
-    # 極高風險 IP
     if [ "$HIGH_RISK_IPS_COUNT" -gt 0 ]; then
         echo -e "${CYAN}▶ 封鎖極高風險 IP:${NC}"
         for ip in $HIGH_RISK_IPS; do
