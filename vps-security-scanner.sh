@@ -1,12 +1,13 @@
 #!/bin/bash
 
 #################################################
-# VPS 系統資源與安全掃描工具 v6.9.0 - 完整版
+# VPS 系統資源與安全掃描工具 v7.0.0 - 完整版
 # 修正項目:
-#  1. Fail2Ban 移到 IP 檢測後面
-#  2. 發現極高風險 IP 直接封鎖(不詢問)
-#  3. 顯示 Fail2Ban 目前封鎖 IP
-#  4. 大目錄占用分析顯示全部
+#  1. 惡意行程只警告不自動 kill
+#  2. Fail2Ban ignore IP: 114.39.15.25
+#  3. auth.log 只掃描最近24小時
+#  4. 限制 find 掃描深度與範圍
+#  5. 先看見風險,再手動處理
 #################################################
 
 # 顏色定義
@@ -20,13 +21,19 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="6.9.0"
+VERSION="7.0.0"
 
-# 掃描範圍
+# 固定白名單 IP
+WHITELIST_IP="114.39.15.25"
+
+# 掃描範圍 - 僅高風險目錄
 SCAN_ROOT_BASE=(
     "/var/www"
     "/home"
 )
+
+# 掃描深度限制
+MAX_SCAN_DEPTH=5
 
 # 效能優化
 renice -n 19 $$ >/dev/null 2>&1
@@ -57,23 +64,22 @@ add_alert() {
 
 build_scan_paths() {
     local roots=()
-    for p in "${SCAN_ROOT_BASE[@]}"; do
-        [ -d "$p" ] && roots+=("$p")
-    done
-
+    
+    # 只掃描明確的 web 根目錄
+    [ -d "/var/www" ] && roots+=("/var/www")
+    
     if [ -d "/home" ]; then
         while IFS= read -r d; do
             [ -d "$d/public_html" ] && roots+=("$d/public_html")
             [ -d "$d/www" ] && roots+=("$d/www")
             [ -d "$d/web" ] && roots+=("$d/web")
-            [ -d "$d/app/public" ] && roots+=("$d/app/public")
         done < <(find /home -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
     fi
 
     if [ -d "/home/fly" ]; then
         while IFS= read -r d; do
             [ -d "$d/app/public" ] && roots+=("$d/app/public")
-        done < <(find /home/fly -mindepth 1 -maxdepth 2 -type d 2>/dev/null)
+        done < <(find /home/fly -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
     fi
 
     printf '%s\n' "${roots[@]}" | sort -u | tr '\n' ' '
@@ -113,6 +119,9 @@ CRITICAL_THREATS=0
 HIGH_RISK_IPS_COUNT=0
 HIGH_RISK_IPS=""
 declare -A SITE_THREATS
+SUSPICIOUS_PROCESSES=()
+MALWARE_FILES=()
+WEBSHELL_FILES=()
 
 # ==========================================
 # 標題
@@ -591,7 +600,7 @@ fi
 echo ""
 
 # ==========================================
-# 失敗登入分析 (先執行以收集極高風險 IP)
+# 失敗登入分析 (只掃描最近24小時)
 # ==========================================
 if [ -f /var/log/auth.log ]; then
     LOG_FILE="/var/log/auth.log"
@@ -605,12 +614,19 @@ FAILED_COUNT=0
 CRITICAL_COUNT=0
 
 if [ -n "$LOG_FILE" ]; then
-    FAILED_COUNT=$(grep "Failed password" "$LOG_FILE" 2>/dev/null | wc -l)
+    # 計算24小時前的時間戳
+    TIME_24H_AGO=$(date -d "24 hours ago" '+%b %e' 2>/dev/null)
+    
+    # 只掃描最近24小時的失敗登入
+    FAILED_COUNT=$(grep "Failed password" "$LOG_FILE" 2>/dev/null | \
+                  awk -v cutoff="$TIME_24H_AGO" '$0 ~ cutoff {flag=1} flag' | \
+                  wc -l)
     
     if [ "$FAILED_COUNT" -gt 0 ]; then
         ANALYSIS_TMP=$(mktemp)
         
         grep "Failed password" "$LOG_FILE" 2>/dev/null | \
+        awk -v cutoff="$TIME_24H_AGO" '$0 ~ cutoff {flag=1} flag' | \
         awk '{for(i=1;i<=NF;i++){if($i=="from"){print $(i+1)}}}' | \
         grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | \
         sort | uniq -c | sort -rn > "$ANALYSIS_TMP"
@@ -631,7 +647,7 @@ if [ -n "$LOG_FILE" ]; then
     fi
 fi
 
-echo -e "${BOLD}${CYAN}▶ 失敗登入分析${NC}"
+echo -e "${BOLD}${CYAN}▶ 失敗登入分析 (最近24小時)${NC}"
 
 if [ "$FAILED_COUNT" -eq 0 ]; then
     echo -e "${GREEN}✓ 無失敗登入記錄${NC}"
@@ -687,7 +703,7 @@ fi
 echo ""
 
 # ==========================================
-# Fail2Ban 自動安裝與管理 (移到這裡)
+# Fail2Ban 自動安裝與管理
 # ==========================================
 echo -e "${YELLOW}🛡️  Fail2Ban 防護狀態${NC}"
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
@@ -721,10 +737,10 @@ if ! command -v fail2ban-client &>/dev/null; then
         [ -z "$CURRENT_IP" ] && CURRENT_IP=$(echo $SSH_CLIENT | awk '{print $1}' 2>/dev/null)
         [ -z "$CURRENT_IP" ] && CURRENT_IP="0.0.0.0/0"
         
-        # 寫入配置檔
+        # 寫入配置檔 (包含白名單IP)
         cat >/etc/fail2ban/jail.local <<EOF
 [DEFAULT]
-ignoreip = 127.0.0.1/8 ::1 ${CURRENT_IP}
+ignoreip = 127.0.0.1/8 ::1 ${CURRENT_IP} ${WHITELIST_IP}
 bantime = 1h
 findtime = 10m
 maxretry = 5
@@ -753,7 +769,7 @@ EOF
             echo ""
             echo -e "${GREEN}✓ Fail2Ban 安裝完成!${NC}"
             echo -e "${DIM}規則: 10分鐘內失敗5次 → 封鎖1小時${NC}"
-            echo -e "${DIM}您的 IP (${CURRENT_IP}) 已加入白名單${NC}"
+            echo -e "${DIM}白名單 IP: ${CURRENT_IP}, ${WHITELIST_IP}${NC}"
         else
             echo -e " ${RED}✗${NC}"
             echo -e "${RED}✗ 服務啟動失敗${NC}"
@@ -798,28 +814,13 @@ if command -v fail2ban-client &>/dev/null && systemctl is-active --quiet fail2ba
         echo ""
     fi
     
-    # 自動封鎖極高風險 IP (直接封鎖,不詢問)
+    # 顯示極高風險 IP,但不自動封鎖
     if [ "$HIGH_RISK_IPS_COUNT" -gt 0 ] && [ -n "$HIGH_RISK_IPS" ]; then
         echo -e "${RED}🚨 發現 ${HIGH_RISK_IPS_COUNT} 個極高風險 IP (>500次失敗登入)${NC}"
-        echo -e "${CYAN}▶ 自動封鎖中...${NC}"
-        BANNED_COUNT=0
-        
+        echo -e "${YELLOW}建議手動封鎖指令:${NC}"
         for ip in $HIGH_RISK_IPS; do
-            # 檢查是否已被封鎖
-            if ! fail2ban-client status sshd 2>/dev/null | grep -q "$ip"; then
-                fail2ban-client set sshd banip "$ip" >/dev/null 2>&1
-                if [ $? -eq 0 ]; then
-                    echo -e "  ${GREEN}✓ 已封鎖: ${ip}${NC}"
-                    BANNED_COUNT=$((BANNED_COUNT + 1))
-                fi
-            else
-                echo -e "  ${DIM}已在封鎖中: ${ip}${NC}"
-            fi
+            echo -e "  ${CYAN}fail2ban-client set sshd banip ${ip}${NC}"
         done
-        
-        if [ "$BANNED_COUNT" -gt 0 ]; then
-            echo -e "${GREEN}✓ 成功封鎖 ${BANNED_COUNT} 個 IP${NC}"
-        fi
         echo ""
     fi
 elif command -v fail2ban-client &>/dev/null; then
@@ -829,12 +830,13 @@ elif command -v fail2ban-client &>/dev/null; then
 fi
 
 # ==========================================
-# 惡意 Process 掃描
+# 惡意 Process 掃描 (只警告不 kill)
 # ==========================================
 echo -e "${YELLOW}[1/4] 🔍 惡意 Process 掃描${NC}"
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
 
-MALICIOUS_PROCESSES=$(ps aux | awk 'length($11) == 8 && $11 ~ /^[a-z0-9]+$/ && $11 !~ /lsphp|systemd|docker|mysql|redis|lighttpd|postgres|memcache/' | grep -v "USER" | wc -l)
+# 更嚴格的誤判避免規則
+MALICIOUS_PROCESSES=$(ps aux | awk 'length($11) == 8 && $11 ~ /^[a-z0-9]+$/ && $11 !~ /lsphp|systemd|docker|mysql|redis|lighttpd|postgres|memcache|sshd|nginx|apache|node|python|java|ruby/' | grep -v "USER" | wc -l)
 CRYPTO_MINERS=$(ps aux | grep -iE "xmrig|minerd|cpuminer|ccminer|cryptonight|monero|kinsing" | grep -v grep | wc -l)
 TOTAL_SUSPICIOUS=$((MALICIOUS_PROCESSES + CRYPTO_MINERS))
 
@@ -844,49 +846,46 @@ if [ "$TOTAL_SUSPICIOUS" -gt 0 ]; then
 
     if [ "$MALICIOUS_PROCESSES" -gt 0 ]; then
         echo -e "${RED}├─ 亂碼名稱: ${MALICIOUS_PROCESSES} 個${NC}"
-        ps aux | awk 'length($11) == 8 && $11 ~ /^[a-z0-9]+$/' | grep -v "USER" | head -3 | while read line; do
+        ps aux | awk 'length($11) == 8 && $11 ~ /^[a-z0-9]+$/ && $11 !~ /lsphp|systemd|docker|mysql|redis|lighttpd|postgres|memcache|sshd|nginx|apache|node|python|java|ruby/' | grep -v "USER" | head -5 | while read line; do
             PROC=$(echo "$line" | awk '{print $11}')
             PID=$(echo "$line" | awk '{print $2}')
             CPU_P=$(echo "$line" | awk '{print $3}')
-            echo -e "${RED}│  • ${PROC} ${DIM}(PID: ${PID}, CPU: ${CPU_P}%)${NC}"
+            USER=$(echo "$line" | awk '{print $1}')
+            echo -e "${RED}│  • ${PROC} ${DIM}(PID: ${PID}, User: ${USER}, CPU: ${CPU_P}%)${NC}"
+            SUSPICIOUS_PROCESSES+=("kill -9 $PID  # $PROC")
         done
     fi
 
     if [ "$CRYPTO_MINERS" -gt 0 ]; then
         echo -e "${RED}├─ 挖礦程式: ${CRYPTO_MINERS} 個${NC}"
-        ps aux | grep -iE "xmrig|minerd|cpuminer" | grep -v grep | head -3 | while read line; do
+        ps aux | grep -iE "xmrig|minerd|cpuminer" | grep -v grep | head -5 | while read line; do
             PROC=$(echo "$line" | awk '{print $11}')
             PID=$(echo "$line" | awk '{print $2}')
             CPU_P=$(echo "$line" | awk '{print $3}')
-            echo -e "${RED}│  • ${PROC} ${DIM}(PID: ${PID}, CPU: ${CPU_P}%)${NC}"
+            USER=$(echo "$line" | awk '{print $1}')
+            echo -e "${RED}│  • ${PROC} ${DIM}(PID: ${PID}, User: ${USER}, CPU: ${CPU_P}%)${NC}"
+            SUSPICIOUS_PROCESSES+=("kill -9 $PID  # $PROC")
         done
         add_alert "CRITICAL" "挖礦程式: ${CRYPTO_MINERS} 個"
         CRITICAL_THREATS=$((CRITICAL_THREATS + CRYPTO_MINERS))
     fi
 
     THREATS_FOUND=$((THREATS_FOUND + TOTAL_SUSPICIOUS))
-
-    echo ""
-    echo -ne "${YELLOW}🧹 自動清除中...${NC}"
-    ps aux | awk 'length($11) == 8 && $11 ~ /^[a-z0-9]+$/' | grep -v "USER" | awk '{print $2}' | xargs kill -9 2>/dev/null
-    ps aux | grep -iE "xmrig|minerd|cpuminer" | grep -v grep | awk '{print $2}' | xargs kill -9 2>/dev/null
-    THREATS_CLEANED=$((THREATS_CLEANED + TOTAL_SUSPICIOUS))
-    echo -e " ${GREEN}✓ 完成${NC}"
 else
     echo -e "${GREEN}✓ 未發現可疑 process${NC}"
 fi
 echo ""
 
 # ==========================================
-# 病毒檔名掃描
+# 病毒檔名掃描 (限制深度)
 # ==========================================
-echo -e "${YELLOW}[2/4] 🦠 病毒檔名掃描${NC}"
+echo -e "${YELLOW}[2/4] 🦠 病毒檔名掃描 (深度限制: ${MAX_SCAN_DEPTH})${NC}"
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
 
 MALWARE_TMPFILE=$(mktemp)
 
 if [ -n "$SCAN_PATHS" ]; then
-    find $SCAN_PATHS -type f \( \
+    find $SCAN_PATHS -maxdepth $MAX_SCAN_DEPTH -type f \( \
         -iname "*c99*.php" -o \
         -iname "*r57*.php" -o \
         -iname "*wso*.php" -o \
@@ -910,6 +909,7 @@ if [ "$MALWARE_COUNT" -gt 0 ]; then
     while IFS= read -r file; do
         SITE_PATH=$(echo "$file" | grep -oP '/(var/www/|home/[^/]+/(public_html|www|web|app/public))' | head -1)
         echo -e "${RED}├─ ${file}${NC}"
+        MALWARE_FILES+=("$file")
         
         if [ -n "$SITE_PATH" ]; then
             SITE_THREATS["$SITE_PATH"]=$((${SITE_THREATS["$SITE_PATH"]:-0} + 1))
@@ -927,15 +927,15 @@ rm -f "$MALWARE_TMPFILE"
 echo ""
 
 # ==========================================
-# Webshell 掃描
+# Webshell 掃描 (限制深度)
 # ==========================================
-echo -e "${YELLOW}[3/4] 🔍 Webshell 特徵碼掃描${NC}"
+echo -e "${YELLOW}[3/4] 🔍 Webshell 特徵碼掃描 (深度限制: ${MAX_SCAN_DEPTH})${NC}"
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
 
 WEBSHELL_TMPFILE=$(mktemp)
 
 if [ -n "$SCAN_PATHS" ]; then
-    find $SCAN_PATHS -type f -name "*.php" \
+    find $SCAN_PATHS -maxdepth $MAX_SCAN_DEPTH -type f -name "*.php" \
         ! -path "*/vendor/*" \
         ! -path "*/cache/*" \
         ! -path "*/node_modules/*" \
@@ -954,6 +954,7 @@ if [ "$WEBSHELL_COUNT" -gt 0 ]; then
     while IFS= read -r file; do
         SITE_PATH=$(echo "$file" | grep -oP '/(var/www/|home/[^/]+/(public_html|www|web|app/public))' | head -1)
         echo -e "${RED}├─ ${file}${NC}"
+        WEBSHELL_FILES+=("$file")
         
         if [ -n "$SITE_PATH" ]; then
             SITE_THREATS["$SITE_PATH"]=$((${SITE_THREATS["$SITE_PATH"]:-0} + 1))
@@ -1012,7 +1013,7 @@ fi
 
 echo -e "${BOLD}威脅等級:${NC} ${THREAT_LEVEL}"
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
-echo -e "發現威脅: ${WHITE}${THREATS_FOUND}${NC} | 關鍵威脅: ${RED}${CRITICAL_THREATS}${NC} | 已清除: ${GREEN}${THREATS_CLEANED}${NC}"
+echo -e "發現威脅: ${WHITE}${THREATS_FOUND}${NC} | 關鍵威脅: ${RED}${CRITICAL_THREATS}${NC}"
 
 if [ ${#ALERTS[@]} -gt 0 ]; then
     echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
@@ -1033,6 +1034,52 @@ if [ ${#ALERTS[@]} -gt 0 ]; then
     done
 fi
 
+# ==========================================
+# 處理建議 (顯示所有清理指令)
+# ==========================================
+if [ "$THREATS_FOUND" -gt 0 ]; then
+    echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
+    echo -e "${YELLOW}${BOLD}🛠️  建議處理指令:${NC}"
+    echo ""
+    
+    # 可疑 Process
+    if [ ${#SUSPICIOUS_PROCESSES[@]} -gt 0 ]; then
+        echo -e "${CYAN}▶ 終止可疑 Process:${NC}"
+        for cmd in "${SUSPICIOUS_PROCESSES[@]}"; do
+            echo -e "  ${WHITE}${cmd}${NC}"
+        done
+        echo ""
+    fi
+    
+    # 惡意檔案
+    if [ ${#MALWARE_FILES[@]} -gt 0 ]; then
+        echo -e "${CYAN}▶ 刪除病毒檔案:${NC}"
+        for file in "${MALWARE_FILES[@]}"; do
+            echo -e "  ${WHITE}rm -f \"${file}\"${NC}"
+        done
+        echo ""
+    fi
+    
+    # Webshell
+    if [ ${#WEBSHELL_FILES[@]} -gt 0 ]; then
+        echo -e "${CYAN}▶ 檢視並刪除 Webshell:${NC}"
+        for file in "${WEBSHELL_FILES[@]}"; do
+            echo -e "  ${WHITE}less \"${file}\"  ${DIM}# 檢視內容${NC}"
+            echo -e "  ${WHITE}rm -f \"${file}\"  ${DIM}# 確認後刪除${NC}"
+        done
+        echo ""
+    fi
+    
+    # 極高風險 IP
+    if [ "$HIGH_RISK_IPS_COUNT" -gt 0 ]; then
+        echo -e "${CYAN}▶ 封鎖極高風險 IP:${NC}"
+        for ip in $HIGH_RISK_IPS; do
+            echo -e "  ${WHITE}fail2ban-client set sshd banip ${ip}${NC}"
+        done
+        echo ""
+    fi
+fi
+
 echo -e "${DIM}────────────────────────────────────────────────────────────────${NC}"
 echo -e "${DIM}掃描完成: $(date '+%Y-%m-%d %H:%M:%S')${NC}"
 echo -e "${BOLD}${CYAN}═══════════════════════════════════════════════════════════════════${NC}"
@@ -1045,8 +1092,9 @@ if [ "$CRITICAL_THREATS" -eq 0 ] && [ "$THREATS_FOUND" -lt 5 ]; then
     echo -e "${DIM}  • 定期更新系統與軟體${NC}"
 else
     echo -e "${YELLOW}⚠ 建議立即處理發現的威脅${NC}"
-    echo -e "${DIM}  • 檢查並刪除可疑檔案${NC}"
+    echo -e "${DIM}  • 使用上方建議指令處理${NC}"
     echo -e "${DIM}  • 更改所有管理員密碼${NC}"
     echo -e "${DIM}  • 更新 WordPress 與外掛${NC}"
+    echo -e "${DIM}  • 檢查檔案權限設定${NC}"
 fi
 echo ""
